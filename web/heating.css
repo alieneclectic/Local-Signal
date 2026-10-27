@@ -1,0 +1,46 @@
+.heating-overview {display:flex;align-items:center;justify-content:space-between;gap:20px;padding:24px 26px;margin:25px 0;background:linear-gradient(120deg,#fdfefb,#edf3e6)}
+.heating-overview .eyebrow {display:block;margin-bottom:9px}
+.heating-overview h2 {font-size:28px;color:#33563e;font-variant-numeric:tabular-nums}
+.heating-overview h2 small {font-size:13px;color:#718567;font-weight:400;letter-spacing:0}
+.heating-overview p {font-size:11px;color:#708364;margin-top:8px}
+.energy-toolbar {display:flex;align-items:center;gap:16px;margin:24px 0}
+.energy-toolbar>span {font-size:11px;color:#72816b}
+.energy-toolbar>a {margin-left:auto}
+.energy-stats {margin-bottom:20px}
+.energy-stats .stat-value {font-size:30px}
+.energy-stats+.notice {margin-bottom:23px;line-height:1.7}
+.energy-panel {margin:25px 0;overflow:hidden}
+.energy-panel .table-scroll {overflow:auto}
+.energy-panel th,.energy-panel td {color:#526b47;white-space:nowrap;font-size:12px}
+.energy-panel th {font-size:10px}
+.energy-source-name {display:block;font-size:10px;color:#768a6a;margin-top:5px}
+.energy-method {font-size:11px;line-height:1.8;color:#6c8061;padding:18px 24px}
+.energy-chart-scroll {overflow-x:auto;padding:15px 24px 24px}
+.energy-bars {display:grid;grid-template-columns:repeat(var(--days),minmax(38px,1fr));gap:12px;min-height:200px}
+.energy-day {display:flex;flex-direction:column;gap:10px;align-items:center;min-width:0;font-size:10px;color:#718566}
+.energy-bar-track {height:140px;width:100%;max-width:65px;display:flex;align-items:flex-end;border-bottom:1px solid #cfd9c3}
+.energy-bar {width:100%;background:#6c8e58;border-radius:4px 4px 0 0;min-height:2px}
+.energy-bar.missing {background:#cbd4c1}
+.energy-bar-value {font-variant-numeric:tabular-nums;font-weight:600;color:#4d6c3d;font-size:11px}
+.energy-settings {padding:0 24px 24px}
+.energy-settings .energy-method {padding:0;margin:5px 0 20px}
+.energy-settings fieldset {border:1px solid #dfe6d6;border-radius:8px;padding:15px 17px;margin:0 0 20px}
+.energy-settings legend {font-size:11px;color:#526e46;padding:0 6px}
+.energy-settings .check-label {margin:8px 0;color:#536f47;font-size:12px}
+.energy-settings .form-row label {color:#536f47;font-size:12px}
+.energy-settings input {color:#3c5834}
+.energy-panel .settings-list dd {overflow-wrap:anywhere}
+@media(max-width:1050px){.energy-stats .stat-value{font-size:25px}}
+@media(max-width:600px){
+ .heating-overview{padding:19px;flex-wrap:wrap;gap:14px}
+ .heating-overview h2{font-size:26px}.heating-overview p{font-size:10px}
+ .energy-toolbar{flex-wrap:wrap;gap:12px}.energy-toolbar>span{font-size:10px}
+ .energy-toolbar>a{margin-left:0}.energy-toolbar .segmented button{padding:8px 13px}
+ .energy-stats .stat-value{font-size:25px}.energy-stats .stat-sub{font-size:9px;line-height:1.5}
+ .energy-panel .panel-heading{gap:15px;align-items:flex-start}
+ .energy-panel .text-button{font-size:10px;white-space:nowrap}
+ .energy-settings{padding:0 17px 20px}.energy-settings .form-row{flex-direction:column;gap:12px}
+ .energy-settings .form-row label{width:100%}.energy-method{padding:16px 17px;font-size:10px}
+ .energy-chart-scroll{padding:12px 17px 20px}.energy-bars{gap:9px}
+ .energy-panel th,.energy-panel td{font-size:11px}.energy-source-name{font-size:9px}
+}

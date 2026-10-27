@@ -1,0 +1,97 @@
+from datetime import datetime, timedelta, timezone
+from contextlib import closing
+from pathlib import Path
+import sqlite3
+import tempfile
+import unittest
+from unittest.mock import patch
+
+import background
+import reliability
+import server
+
+
+class BackupTests(unittest.TestCase):
+    def test_consistent_wal_backup_restores_and_rotates_seven_daily_copies(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / 'live.sqlite3'
+            with closing(sqlite3.connect(source)) as db, db:
+                db.execute('PRAGMA journal_mode=WAL')
+                db.execute('CREATE TABLE history (value)')
+                db.execute('INSERT INTO history VALUES (42)')
+                db.commit()
+                for day in range(9):
+                    result = reliability.backup_database(source, Path(folder) / 'backups', datetime(2026, 10, 1 + day, tzinfo=timezone.utc))
+                copies = sorted((Path(folder) / 'backups').glob('*.sqlite3'))
+                self.assertEqual(len(copies), 7)
+                self.assertEqual(copies[0].name, 'hearth-2026-10-03.sqlite3')
+                with closing(sqlite3.connect(copies[-1])) as restored:
+                    self.assertEqual(restored.execute('SELECT value FROM history').fetchone()[0], 42)
+                    self.assertEqual(restored.execute('PRAGMA quick_check').fetchone()[0], 'ok')
+
+    def test_update_does_not_overwrite_installed_database(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source, target = Path(folder) / 'source.db', Path(folder) / 'installed.db'
+            with closing(sqlite3.connect(source)) as db, db:
+                db.execute('CREATE TABLE inventory (name)'); db.execute("INSERT INTO inventory VALUES ('original')")
+            background.copy_database(source, target)
+            with closing(sqlite3.connect(target)) as db, db:
+                db.execute("UPDATE inventory SET name='newer installed history'")
+            background.copy_database(source, target)
+            with closing(sqlite3.connect(target)) as db:
+                self.assertEqual(db.execute('SELECT name FROM inventory').fetchone()[0], 'newer installed history')
+
+    def test_agent_uses_internal_runtime_and_fixed_environment(self):
+        root = Path('/Users/example/Library/Application Support/Hearth')
+        config = background.agent_config(root / '.venv/bin/python', root / 'runtime', root / 'data/hearth.sqlite3')
+        self.assertTrue(config['KeepAlive'])
+        self.assertTrue(config['RunAtLoad'])
+        self.assertIn('--background', config['ProgramArguments'])
+        self.assertNotIn('/Volumes/', str(config))
+        self.assertIn('/sbin', config['EnvironmentVariables']['PATH'])
+        signed = background.agent_config(root / '.venv/bin/python', root / 'runtime', root / 'data/hearth.sqlite3', root / 'Hearth.app/Contents/MacOS/Hearth')
+        self.assertEqual(signed['AssociatedBundleIdentifiers'], [background.LABEL])
+        self.assertEqual(signed['ProgramArguments'], [str(root / 'Hearth.app/Contents/MacOS/Hearth')])
+
+
+class CollectionRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = server.Store(Path(self.tmp.name) / 'test.sqlite3')
+        with patch.object(server, 'network_info', return_value={'local_ip': None}):
+            self.collector = server.Collector(self.store)
+
+    def tearDown(self):
+        self.store.db.close(); self.tmp.cleanup()
+
+    def test_failed_cycle_reports_delayed_and_next_cycle_recovers(self):
+        with patch.object(server, 'network_info', return_value={}), patch.object(self.store, 'devices', side_effect=sqlite3.OperationalError('temporary disk error')):
+            self.collector.poll()
+        self.assertEqual(self.collector.snapshot()['health'], 'delayed')
+        self.assertFalse(self.collector.state['polling'])
+        with patch.object(server, 'network_info', return_value={}), patch.object(self.store, 'devices', return_value=[]):
+            self.collector.poll()
+        self.assertEqual(self.collector.snapshot()['health'], 'healthy')
+        self.assertIsNone(self.collector.state['collection_error'])
+
+    def test_restart_does_not_claim_health_from_previous_process_poll(self):
+        self.store.save_setting('last_completed_poll', server.now())
+        with patch.object(server, 'network_info', return_value={}):
+            restarted = server.Collector(self.store)
+        self.assertEqual(restarted.snapshot()['health'], 'starting')
+        with patch.object(server, 'network_info', return_value={}), patch.object(self.store, 'devices', return_value=[]):
+            restarted.poll()
+        self.assertEqual(restarted.snapshot()['health'], 'healthy')
+
+    def test_downtime_gap_survives_restart_and_backup_failure_is_visible(self):
+        previous = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+        self.store.save_setting('last_completed_poll', previous)
+        with patch.object(server, 'network_info', return_value={}):
+            collector = server.Collector(self.store)
+        with patch.object(server, 'network_info', return_value={}), patch.object(self.store, 'devices', return_value=[]):
+            collector.poll()
+        self.assertEqual(collector.state['last_gap']['start'], previous)
+        self.assertEqual(self.store.setting('last_collection_gap')['start'], previous)
+        with patch.object(reliability, 'backup_database', side_effect=OSError('disk full')):
+            collector.backup_if_due()
+        self.assertIn('disk full', collector.snapshot()['backup_error'])
