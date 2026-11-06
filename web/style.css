@@ -83,3 +83,161 @@
   .breadcrumb-network { display: none; }
   .mobile-brand { display: grid; place-items: center; }
 }
+
+.theme-selector button {
+  min-width: 44px;
+  min-height: 32px;
+  color: var(--green);
+}
+.theme-selector button.selected {
+  background: var(--green);
+  color: var(--paper);
+}
+.chart-gridline { stroke: var(--chart-grid, #e9ece5); }
+.chart-latest { stroke: var(--paper); }
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #111a15;
+  --paper: #1b2620;
+  --chrome: #17221b;
+  --ink: #e9f1e9;
+  --muted: #afc0b1;
+  --green: #b4dcae;
+  --line: #37483c;
+  --control-border: #657e6c;
+  --sage: #293b2e;
+  --warm: #3c3020;
+  --warning: #f1cb8e;
+  --danger: #fac2b4;
+  --danger-surface: #412b27;
+  --chart-grid: #405246;
+  --chart-series-1: #8fd6a5;
+  --chart-series-2: #d4dc84;
+  --chart-series-3: #f5b889;
+  --chart-series-4: #a4c9f2;
+  --chart-series-5: #cfb5ee;
+  --chart-series-6: #f4a5b4;
+  --chart-series-7: #83d3d8;
+  --chart-series-8: #dbc398;
+}
+
+:root[data-theme="dark"] :is(.sidebar, .topbar, dialog, th) {
+  background: var(--chrome);
+  border-color: var(--line);
+}
+:root[data-theme="dark"] :is(.workspace-card, .stat-card, .device-card) {
+  background: var(--paper);
+}
+:root[data-theme="dark"] :is(
+  .local-card, .stat-card.highlight, .insight-panel, .notice, .discovered-identity,
+  .detail-metrics > div, .raw-details pre
+) {
+  background: var(--sage);
+  border-color: var(--line);
+}
+:root[data-theme="dark"] :is(.chart-note, .device-ip, .activity-row, td, .settings-list > div) {
+  border-color: var(--line);
+}
+:root[data-theme="dark"] :is(
+  .workspace-symbol, .nav-count, .profile-avatar, .top-avatar, .stat-icon, .highlight .stat-icon,
+  .count-badge, .device-type-icon, .device-type-icon.sage, .event-icon, .event-icon.positive,
+  .filter-tab > span, .filter-tab.active > span, .protocol-tag.supported, .api-logo
+) {
+  background: var(--sage);
+  border-color: var(--line);
+  color: var(--green);
+}
+
+:root[data-theme="dark"] :is(
+  .nav-label, .nav-item, .local-card p, .local-tag, .profile small, .breadcrumb, .breadcrumb b,
+  .page-heading p, .stat-top, .stat-sub, .highlight .stat-top, .highlight .stat-sub,
+  .panel-heading p, .section-heading p, .legend-item, .chart-note, .chart-empty,
+  .device-meta, .device-meta > span, .device-card-title > .icon, .device-card-bottom,
+  .reading-label, .card-reading > small, .card-reading.unavailable, .card-reading.unavailable > small,
+  .device-ip, .device-ip > span, .activity-label, .activity-row small, .activity-row time,
+  .small-kicker, .insight-panel p, .page-footer, .empty-state, .loading-state, .filter-tab,
+  .search-field .icon, .inventory-caption, th, td, .table-device small, .media-state-label,
+  .protocol-tag, .settings-list dt, .setting-choice p, .supported-apis small, .detail-metrics span,
+  .device-info-list dt, .detail-edit-heading > span, .raw-details, .raw-details summary span,
+  .last-readings, .discovered-identity > div, .discovered-identity > div > span, .discovered-identity small,
+  form > label, .form-row > label, .check-label
+) { color: var(--muted); }
+:root[data-theme="dark"] :is(input, textarea)::placeholder {
+  color: var(--muted);
+}
+:root[data-theme="dark"] :is(
+  .breadcrumb strong, .highlight .stat-value, .chart-empty strong, .legend-item strong,
+  .activity-row p, .insight-panel h3, .table-device, .settings-list dd, .setting-choice strong,
+  .supported-apis h3, .supported-apis strong, .detail-metrics strong, .device-info-list dd,
+  .detail-edit-heading h3, .discovered-identity p, .raw-details pre
+) { color: var(--ink); }
+:root[data-theme="dark"] :is(
+  .local-symbol, .live-pill, .icon-button, .eyebrow, .chart-empty > .icon, .text-button,
+  .insight-icon, .page-footer .icon, .notice, .table-device > .icon, .supported-apis .icon,
+  .filter-tab.active, .stat-link
+) { color: var(--green); }
+:root[data-theme="dark"] .telemetry-chart text { fill: var(--muted); }
+:root[data-theme="dark"] .legend-item.dimmed {
+  opacity: 1;
+  text-decoration: line-through;
+}
+:root[data-theme="dark"] .filter-tab.active::after { background: var(--green); }
+
+:root[data-theme="dark"] :is(.nav-item:hover, .nav-item.active, .inventory-card-heading:hover) {
+  background: var(--sage);
+  color: var(--green);
+}
+:root[data-theme="dark"] .device-card:hover { border-color: var(--control-border); }
+:root[data-theme="dark"] .button.primary { color: var(--bg); }
+:root[data-theme="dark"] .button.primary:hover { background: #caeac6; }
+:root[data-theme="dark"] :is(.button.secondary, .select-wrap, .segmented, .search-field, input:not([type=checkbox]), textarea) {
+  background: var(--chrome);
+  border-color: var(--control-border);
+  color: var(--ink);
+}
+:root[data-theme="dark"] .button.secondary:hover { background: var(--sage); }
+:root[data-theme="dark"] :is(.select-wrap select, .select-wrap option) { color: var(--ink); }
+:root[data-theme="dark"] .select-wrap option { background: var(--chrome); }
+:root[data-theme="dark"] .segmented button { color: var(--ink); }
+:root[data-theme="dark"] .segmented button.selected {
+  background: var(--green);
+  color: var(--bg);
+}
+:root[data-theme="dark"] :is(.select-wrap, .search-field):focus-within {
+  outline: 3px solid var(--green);
+  outline-offset: 2px;
+}
+:root[data-theme="dark"] dialog::backdrop { background: #080d0acc; }
+:root[data-theme="dark"] .form-error { color: var(--danger); }
+:root[data-theme="dark"] .loading-ring {
+  border-color: var(--line);
+  border-top-color: var(--green);
+}
+
+:root[data-theme="dark"] :is(.dot, .status-badge .dot, .page-footer .dot, .live-pill.disconnected .dot) {
+  background: currentColor;
+}
+:root[data-theme="dark"] .status-badge {
+  background: var(--sage);
+  color: var(--muted);
+}
+:root[data-theme="dark"] .status-badge.online { color: var(--green); }
+:root[data-theme="dark"] :is(.status-badge.reachable, .status-badge.attention, .status-badge.release-published, .notice.warning) {
+  background: var(--warm);
+  color: var(--warning);
+}
+:root[data-theme="dark"] :is(.status-badge.offline, .status-badge.update-needed, .toast.error) {
+  background: var(--danger-surface);
+  color: var(--danger);
+}
+:root[data-theme="dark"] .status-badge.sleeping {
+  background: #332a42;
+  color: #dcc6f2;
+}
+:root[data-theme="dark"] .live-pill.disconnected { color: var(--warning); }
+:root[data-theme="dark"] .relay-indicator { background: var(--line); }
+:root[data-theme="dark"] .relay-indicator::after { background: var(--muted); }
+:root[data-theme="dark"] .relay-indicator.on { background: var(--green); }
+:root[data-theme="dark"] .relay-indicator.on::after { background: var(--bg); }
+:root[data-theme="dark"] .stale { opacity: .85; }

@@ -37,7 +37,8 @@ const icon = (name, extra='') => `<svg class="icon ${extra}" viewBox="0 0 24 24"
 function hydrateIcons(root=document) { $$('[data-icon]', root).forEach(el => { el.innerHTML = icon(el.dataset.icon); el.removeAttribute('data-icon'); }); }
 hydrateIcons();
 const state = {devices:[], firmware:[], firmware_events:[], collector:{network:{}}, events:[], samples:[], page:'overview', filter:'all', query:'', range:24, metric:'latency_ms', connected:false, initial:true, unit:localStorage.getItem('hearth-unit') || 'F', chartDevices:new Set(), lastHistory:null, historyError:null};
-const colors = ['#2e6a51','#9eac58','#d09460','#7895b0','#9b86ae','#c17e85','#528f90','#b5a384'];
+const colors = ['#2e6a51','#9eac58','#d09460','#7895b0','#9b86ae','#c17e85','#528f90','#b5a384']
+ .map((color, i) => `var(--chart-series-${i+1}, ${color})`);
 let loading = false, toastTimer, detailIP = null;
 const openDeviceCards = new Set();
 const deviceFilters = [
@@ -200,7 +201,7 @@ function buildChart(metricLabel) {
  start=end-span; end+=10000;
  const x=t=>left+(Date.parse(t)-start)/(end-start)*(w-left-right), y=v=>top+(max-converted(v))/(max-min)*(h-top-bottom);
  let svg=`<svg class="telemetry-chart" viewBox="0 0 ${w} ${h}" role="img" aria-label="${esc(metricLabel)} history chart, ${esc(unit)}"><defs>${series.map((s,i)=>`<linearGradient id="fill-${i}" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${s.color}" stop-opacity=".12"/><stop offset="100%" stop-color="${s.color}" stop-opacity="0"/></linearGradient>`).join('')}</defs>`;
- for(let i=0;i<5;i++){const v=min+(max-min)*(4-i)/4, yy=top+(h-top-bottom)*i/4;svg+=`<line x1="${left}" y1="${yy}" x2="${w-right}" y2="${yy}" stroke="#e9ece5" stroke-dasharray="3 5"/><text x="${left-12}" y="${yy+4}" text-anchor="end">${fmt(v,1)}</text>`;}
+ for(let i=0;i<5;i++){const v=min+(max-min)*(4-i)/4, yy=top+(h-top-bottom)*i/4;svg+=`<line class="chart-gridline" x1="${left}" y1="${yy}" x2="${w-right}" y2="${yy}" stroke-dasharray="3 5"/><text x="${left-12}" y="${yy+4}" text-anchor="end">${fmt(v,1)}</text>`;}
  const ticks=compact?2:4;
  for(let i=0;i<=ticks;i++){const t=start+(end-start)*i/ticks,xx=left+(w-left-right)*i/ticks;svg+=`<text x="${xx}" y="${h-7}" text-anchor="${i===0?'start':i===ticks?'end':'middle'}">${(span>86400000?new Date(t).toLocaleString([],{month:'short',day:'numeric',hour:'numeric'}):new Date(t).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}))}</text>`;}
  series.forEach((s,i)=>{
@@ -208,7 +209,7 @@ function buildChart(metricLabel) {
   const gap=Math.max(90000,((Math.max(...timestamps)-Math.min(...timestamps))/300)*2.5),segments=[];let segment=[];
   for(const point of points) {if(segment.length && Date.parse(point.at)-Date.parse(segment.at(-1).at)>gap){segments.push(segment);segment=[];} segment.push(point);}if(segment.length) segments.push(segment);
   for(const seg of segments){const line=seg.map((p,j)=>`${j?'L':'M'}${x(p.at).toFixed(2)},${y(p.value).toFixed(2)}`).join(' ');if(seg.length>1)svg+=`<path d="${line} L${x(seg.at(-1).at)},${h-bottom} L${x(seg[0].at)},${h-bottom} Z" fill="url(#fill-${i})"/><path d="${line}" fill="none" stroke="${s.color}" stroke-width="2.4" stroke-linejoin="round"/>`;}
-  const latest=points.at(-1); svg+=`<circle cx="${x(latest.at)}" cy="${y(latest.value)}" r="5" fill="${s.color}" stroke="#fff" stroke-width="2"><title>${esc(s.device.name)}: ${esc(metricFormat(latest))} at ${esc(dateTime(latest.at))}</title></circle>`;
+  const latest=points.at(-1); svg+=`<circle class="chart-latest" cx="${x(latest.at)}" cy="${y(latest.value)}" r="5" fill="${s.color}" stroke-width="2"><title>${esc(s.device.name)}: ${esc(metricFormat(latest))} at ${esc(dateTime(latest.at))}</title></circle>`;
   // Hover dots expose the actual historical reading without inventing interpolated values.
   if(points.length<160) for(const p of points) svg+=`<circle class="chart-hover-dot" cx="${x(p.at)}" cy="${y(p.value)}" r="6" fill="${s.color}" opacity="0"><title>${esc(s.device.name)} · ${esc(metricFormat(p))} · ${esc(dateTime(p.at))}</title></circle>`;
  });
@@ -368,7 +369,17 @@ function networkPage() {
 }
 function settingsPage() {
  const c=state.collector;
- return `${heading('Settings', 'Manage display preferences and check the collector.',false,'WORKSPACE SETTINGS')}<div class="settings-layout"><section class="panel settings-panel"><div class="panel-heading"><div><h2>Your local collector</h2><p>Collection and storage on the collector computer.</p></div><span class="status-badge ${state.connected?'online':'offline'}"><i class="dot"></i>${state.connected?'Running':'Disconnected'}</span></div><dl class="settings-list"><div><dt>Collection interval</dt><dd>Every ${c.poll_seconds||30} seconds</dd></div><div><dt>History retention</dt><dd>${c.retention_days||30} days</dd></div><div><dt>Data storage</dt><dd>Local SQLite database</dd></div><div><dt>Started</dt><dd>${dateTime(c.started_at)}</dd></div><div><dt>Last collection</dt><dd>${dateTime(c.last_poll)}</dd></div><div><dt>Device access</dt><dd>Read-only telemetry</dd></div></dl><div class="notice">${icon('info')}${c.background?'Background collection starts at login and recovers after failures.':'Keep the server running to collect readings.'} The collector computer must be awake. Closing the browser doesn’t stop collection.</div></section><section class="panel settings-panel"><div class="panel-heading"><div><h2>Preferences</h2><p>Preferences for this browser.</p></div>${icon('settings')}</div><div class="setting-choice"><div><strong>Temperature unit</strong><p>Applies to charts and device readings.</p></div><div class="segmented">${['F','C'].map(u=>`<button class="${state.unit===u?'selected':''}" data-unit="${u}" aria-pressed="${state.unit===u}">°${u}</button>`).join('')}</div></div><div class="setting-choice export-setting"><div><strong>Export history</strong><p>Export all readings from the past 30 days.</p></div><a href="/api/export.csv?hours=720" class="button secondary">${icon('download')}Export CSV</a></div><div class="supported-apis"><h3>Connected locally</h3><div><span class="api-logo">S</span><span><strong>Shelly Gen 1 & Gen 2+</strong><small>Power, sensors, relays, signal & uptime when exposed</small></span>${icon('check')}</div><p class="muted">Local readers also support Roku, Sonos, WiiM UPnP, and Google Cast receivers, including RIVA. Other paired or cloud-managed devices need their own integration. Authentication-protected APIs are flagged for setup.</p></div></section></div>${collectionStatusPanel()}${activityPanel(true)}`;
+ const theme=document.documentElement.dataset.theme;
+ const themeChoice=`<div class="setting-choice">
+  <div><strong id="theme-label">Theme</strong><p>Changes the dashboard appearance.</p></div>
+  <div class="segmented theme-selector" role="group" aria-labelledby="theme-label">
+   ${['Light','Dark'].map(label=>{
+    const value=label.toLowerCase(), selected=theme===value;
+    return `<button id="theme-${value}" class="${selected?'selected':''}" data-theme="${value}" aria-pressed="${selected}">${label}</button>`;
+   }).join('')}
+  </div>
+ </div>`;
+ return `${heading('Settings', 'Manage display preferences and check the collector.',false,'WORKSPACE SETTINGS')}<div class="settings-layout"><section class="panel settings-panel"><div class="panel-heading"><div><h2>Your local collector</h2><p>Collection and storage on the collector computer.</p></div><span class="status-badge ${state.connected?'online':'offline'}"><i class="dot"></i>${state.connected?'Running':'Disconnected'}</span></div><dl class="settings-list"><div><dt>Collection interval</dt><dd>Every ${c.poll_seconds||30} seconds</dd></div><div><dt>History retention</dt><dd>${c.retention_days||30} days</dd></div><div><dt>Data storage</dt><dd>Local SQLite database</dd></div><div><dt>Started</dt><dd>${dateTime(c.started_at)}</dd></div><div><dt>Last collection</dt><dd>${dateTime(c.last_poll)}</dd></div><div><dt>Device access</dt><dd>Read-only telemetry</dd></div></dl><div class="notice">${icon('info')}${c.background?'Background collection starts at login and recovers after failures.':'Keep the server running to collect readings.'} The collector computer must be awake. Closing the browser doesn’t stop collection.</div></section><section class="panel settings-panel"><div class="panel-heading"><div><h2>Preferences</h2><p>Preferences for this browser.</p></div>${icon('settings')}</div>${themeChoice}<div class="setting-choice"><div><strong>Temperature unit</strong><p>Applies to charts and device readings.</p></div><div class="segmented">${['F','C'].map(u=>`<button class="${state.unit===u?'selected':''}" data-unit="${u}" aria-pressed="${state.unit===u}">°${u}</button>`).join('')}</div></div><div class="setting-choice export-setting"><div><strong>Export history</strong><p>Export all readings from the past 30 days.</p></div><a href="/api/export.csv?hours=720" class="button secondary">${icon('download')}Export CSV</a></div><div class="supported-apis"><h3>Connected locally</h3><div><span class="api-logo">S</span><span><strong>Shelly Gen 1 & Gen 2+</strong><small>Power, sensors, relays, signal & uptime when exposed</small></span>${icon('check')}</div><p class="muted">Local readers also support Roku, Sonos, WiiM UPnP, and Google Cast receivers, including RIVA. Other paired or cloud-managed devices need their own integration. Authentication-protected APIs are flagged for setup.</p></div></section></div>${collectionStatusPanel()}${activityPanel(true)}`;
 }
 const views={overview,devices:devicesPage,history:historyPage,network:networkPage,settings:settingsPage};
 function render() {
@@ -430,6 +441,11 @@ document.addEventListener('click',async e=>{
  if(target.dataset.range){state.range=Number(target.dataset.range);await loadHistory();render();}
  if(target.dataset.series){state.chartDevices.has(target.dataset.series)?state.chartDevices.delete(target.dataset.series):state.chartDevices.add(target.dataset.series);render();}
  if(target.dataset.unit){state.unit=target.dataset.unit;localStorage.setItem('hearth-unit',state.unit);render();}
+ if(target.dataset.theme){
+  applyTheme(target.dataset.theme);
+  localStorage.setItem(themeKey,target.dataset.theme);
+  render();
+ }
 });
 document.addEventListener('change',e=>{if(e.target.name==='auto_name'&&e.target.checked){const d=state.devices.find(d=>d.ip===detailIP);$('#edit-form input[name="name"]').value=d.discovered_name||`Device .${detailIP.split('.').at(-1)}`;}if(e.target.id==='metric-select'){state.metric=e.target.value;state.chartDevices.clear();render();}});
 document.addEventListener('input',e=>{if(e.target.name==='name'&&e.target.closest('#edit-form'))$('#edit-form input[name="auto_name"]').checked=false;if(e.target.id==='device-search'){state.query=e.target.value;render();}});

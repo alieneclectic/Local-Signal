@@ -132,6 +132,7 @@ class APITests(unittest.TestCase):
 
     def test_assets_state_history_and_csv(self):
         self.assertEqual(self.request()[0],200)
+        self.assertEqual(self.request('/theme.js')[0],200)
         state=json.loads(self.request('/api/state')[2])
         self.assertEqual((state['devices'], state['events']), ([], []))
         self.assertEqual((state['firmware'], state['firmware_events']), ([], []))
