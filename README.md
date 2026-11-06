@@ -31,6 +31,8 @@ On macOS, [install-background.command](install-background.command) can set up co
 
 Run `./install-background.command --follow-checkout` if you want the background collector at port 8799 to follow edits in this checkout. It reloads the page after frontend edits and restarts collection after backend edits. The collector uses the installed snapshot when the checkout is unavailable or fails to load. Both sources use the same installed history. Rerun the installer when dependencies or the launcher change. Use `--installed-snapshot` to switch back to manual updates.
 
+Volume, mute, relay, Wi-Fi signal, and battery readings are stored when they change, and at least every 10 minutes while they stay the same. Other readings are stored on every collection. To remove repeated readings that an earlier version stored, run `server.py --compact-history --data PATH` with the database path. The command backs up the database first, keeps every change, and then reclaims the freed space.
+
 For Windows collector setup and the Briefcase installer previews, see the [packaging guide](packaging/README.md).
 
 ## Device support

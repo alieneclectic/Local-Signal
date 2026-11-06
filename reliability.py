@@ -40,10 +40,18 @@ def backup_database(source, folder, at=None):
                 live.backup(destination)
                 if destination.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
                     raise sqlite3.DatabaseError('Backup integrity check failed.')
+                # backup() carries over the live WAL mode; a single self-contained file cannot leave sidecars.
+                destination.execute('PRAGMA journal_mode=DELETE')
         temporary.chmod(0o600)
         temporary.replace(target)
     finally:
         temporary.unlink(missing_ok=True)
-    for old in sorted(folder.glob('hearth-????-??-??.sqlite3'), reverse=True)[7:]:
-        old.unlink()
+    # Prune by date so a backup's -wal/-shm files go with it. Only dates that still have a
+    # database count toward the seven kept, so a stray sidecar cannot displace a real backup.
+    prefix = len('hearth-0000-00-00')
+    keep = set(sorted(name[:prefix] for file in folder.glob('hearth-????-??-??.sqlite3')
+                      for name in [file.name])[-7:])
+    for old in folder.glob('hearth-????-??-??.sqlite3*'):
+        if old.name[:prefix] not in keep:
+            old.unlink(missing_ok=True)
     return {'at': (at or datetime.now(timezone.utc)).isoformat(timespec='seconds'), 'file': target.name, 'copies_kept': 7}
