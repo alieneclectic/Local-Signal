@@ -71,9 +71,9 @@ def inventory(candidates, at):
         if saved and device_id and device_id == saved['device_id']:
             check.update(saved)
         checked_at = check['checked_at']
-        if check['status'] in ('available', 'no_update') and (
+        if checked_at and (check['installed_version'] or check['status'] in ('available', 'no_update')) and (
             at - datetime.fromisoformat(checked_at) >= MAX_CHECK_AGE
-            or (device['status'] != 'online' and not device['expected_sleep'] and device['checked_at'] > checked_at)
+            or (device['status'] != 'online' and not device['expected_sleep'] and device.get('checked_at', '') > checked_at)
         ):
             check['status'] = 'stale'
 

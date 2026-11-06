@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install, inspect, or remove Hearth's per-user macOS background collector."""
+"""Install, inspect, or remove Local Signal's per-user macOS background collector."""
 import argparse
 from contextlib import closing
 import json
@@ -23,7 +23,8 @@ DOMAIN = f'gui/{os.getuid()}'
 FILES = ['server.py', 'coiot.py', 'network_names.py', 'media_readers.py', 'energy.py', 'reliability.py', 'background.py', 'requirements.txt', 'macos/Collector.swift']
 FILES += ['firmware/__init__.py', 'firmware/checks.py', 'firmware/adapters/__init__.py',
           'firmware/adapters/shelly.py', 'firmware/adapters/wiim.py', 'firmware/adapters/sonos.py',
-          'firmware/adapters/roku.py', 'firmware/adapters/nest.py', 'firmware/catalog/shelly.json']
+          'firmware/adapters/roku.py', 'firmware/adapters/nest.py', 'firmware/adapters/cast.py',
+          'firmware/catalog/shelly.json']
 SYSTEM_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
 
 
@@ -44,10 +45,10 @@ def build_app(stage):
         shutil.rmtree(app)
     executable = app / 'Contents/MacOS/Hearth'
     executable.parent.mkdir(parents=True)
-    info = {'CFBundleIdentifier': LABEL, 'CFBundleName': 'Hearth', 'CFBundleDisplayName': 'Hearth',
+    info = {'CFBundleIdentifier': LABEL, 'CFBundleName': 'Local Signal', 'CFBundleDisplayName': 'Local Signal',
             'CFBundleExecutable': 'Hearth', 'CFBundlePackageType': 'APPL',
             'CFBundleVersion': '1', 'CFBundleShortVersionString': '1.0', 'LSUIElement': True,
-        'NSLocalNetworkUsageDescription': 'Hearth reads device status and measurements on the local network. Readings stay on this Mac.',
+        'NSLocalNetworkUsageDescription': 'Local Signal reads device status and measurements on the local network. Readings stay on this Mac.',
             'NSBonjourServices': ['_googlecast._tcp', '_http._tcp', '_sonos._tcp', '_roku-ecp._tcp']}
     (app / 'Contents/Info.plist').write_bytes(plistlib.dumps(info))
     subprocess.run(['/usr/bin/xcrun', 'swiftc', '-O', str(stage / 'macos/Collector.swift'), '-o', str(executable)], check=True)

@@ -14,7 +14,7 @@ from urllib.parse import urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 import xml.etree.ElementTree as ET
 
-from firmware.adapters import nest, roku as roku_firmware, sonos as sonos_firmware, wiim
+from firmware.adapters import cast as cast_firmware, nest, roku as roku_firmware, sonos as sonos_firmware, wiim
 from network_names import private_ip
 
 MAX_RESPONSE = 262_144
@@ -72,7 +72,7 @@ class NoRedirects(HTTPRedirectHandler):
 
 
 def local_status_opener():
-    # WiiM and Nest status endpoints use device certificates outside the system trust store.
+    # WiiM and Google Cast status endpoints use device certificates outside the system trust store.
     # The adapters restrict requests to fixed paths on private IPs and validate the reported identity.
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.check_hostname = False
@@ -339,6 +339,18 @@ def cast(ip, device):
                 pass
 
 
+def read_cast_firmware(ip, expected):
+    checked_at = stamp()
+    try:
+        check, model = cast_firmware.read(ip, expected, checked_at, local_status_opener(), read_xml)
+    except (OSError, ValueError, ET.ParseError) as exc:
+        if isinstance(exc, HTTPError):
+            exc.close()
+        check, model = cast_firmware.unknown(checked_at), None
+    return {'firmware_check': check, 'firmware_model': model, 'firmware_peer_mac': check['device_id'],
+            'firmware': check['installed_version']}
+
+
 def select_reader(device):
     protocol = device.get('protocol', '')
     if protocol.startswith('shelly') or (device.get('info') or {}).get('type', '').startswith('SH'):
@@ -354,7 +366,7 @@ def select_reader(device):
         return 'roku-ecp'
     if 'wiim' in identity:
         return 'upnp-av'
-    if any(word in identity for word in ('chromecast','google nest','google-nest','google-home','riva festival','riva-festival')):
+    if any(word in identity for word in ('chromecast','eureka dongle','google nest','google-nest','google-home','riva festival','riva-festival')):
         return 'google-cast'
     return None
 

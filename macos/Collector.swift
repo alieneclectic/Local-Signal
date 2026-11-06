@@ -42,6 +42,6 @@ do {
     try child.run()
     application.run()
 } catch {
-    fputs("Hearth could not start its collector: \(error)\n", stderr)
+    fputs("Local Signal could not start its collector: \(error)\n", stderr)
     exit(1)
 }

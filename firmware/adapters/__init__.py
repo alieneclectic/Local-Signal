@@ -1,1 +1,1 @@
-"""Translate device responses into Hearth firmware observations."""
+"""Translate device responses into Local Signal firmware observations."""

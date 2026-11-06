@@ -1,4 +1,4 @@
-"""Shelly firmware evidence from the local status requests Hearth already makes."""
+"""Shelly firmware evidence from the local status requests Local Signal already makes."""
 import json
 from pathlib import Path
 import re
