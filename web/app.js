@@ -60,6 +60,8 @@ const firmwareGuides = {
   steps:'In Google Home, touch and hold the device’s tile, then open Settings → Device information. Keep the device powered and online for automatic updates.'},
  cast: {label:'Google Cast firmware guide', url:'https://support.google.com/chromecast/answer/7124014?hl=en',
   steps:'In Google Home, touch and hold the device’s tile, then open Settings → Device information → Technical information.'},
+ riva: {label:'RIVA Audio firmware guide', url:'https://www.rivaaudio.com/firmware-updates',
+  steps:'To check for speaker updates, open RIVA Voice (iOS) or Riva Audio (Android) on the same Wi-Fi network. Select your Festival, open its settings, and look for Update Firmware at the bottom. The version shown here is the speaker’s Cast build.'},
 };
 const timeAgo = (value) => { if (!value) return 'Not yet'; const s = Math.max(0, (Date.now()-Date.parse(value))/1000); return s<15?'Just now':s<60?`${Math.floor(s)}s ago`:s<3600?`${Math.floor(s/60)}m ago`:s<86400?`${Math.floor(s/3600)}h ago`:`${Math.floor(s/86400)}d ago`; };
 const dateTime = value => value ? new Date(value).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) : 'Not yet';
@@ -293,7 +295,7 @@ function firmwareDetails(finding, reportedVersion) {
  const published=Boolean(finding.latest_stable) && !offered;
  const checked=published ? finding.catalog_checked_at : finding.checked_at;
  const source=published ? firmwareCatalogLabels[sourceId] : finding.adapter_id==='roku' ? 'Roku device report' : finding.adapter_id==='cast' ? 'Local Cast report' : 'Device report';
- const guide=firmwareGuides[finding.adapter_id];
+ const guide=firmwareGuides[finding.guide_id||finding.adapter_id];
  const guideHeading=status==='current' || status==='checking' ? 'Where to check' : 'Next step';
  const installedLabel={nest:'Installed build',cast:'Installed Cast firmware'}[finding.adapter_id] || 'Installed';
  const releaseLabel=['nest','cast'].includes(finding.adapter_id) ? 'Production release' : 'Latest stable';

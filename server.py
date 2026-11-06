@@ -961,7 +961,7 @@ class Handler(SimpleHTTPRequestHandler):
                 catalogs = {source: self.store.setting(key, {}) for source, key in FIRMWARE_CATALOG_KEYS.items()}
             at = datetime.now(timezone.utc)
             catalogs = {source: catalog for source, catalog in catalogs.items() if firmware_checks.catalog_is_fresh(catalog, at)}
-            candidates, catalog_models = [], {}
+            candidates, firmware_sources = [], {}
             for device in devices:
                 for source, adapter in FIRMWARE_ADAPTERS.items():
                     identity = adapter.identify(device)
@@ -969,14 +969,16 @@ class Handler(SimpleHTTPRequestHandler):
                         continue
                     candidates.append((device, identity))
                     model = adapter.catalog_model(device) if source in FIRMWARE_CATALOGS and identity['device_id'] else None
-                    catalog_models[device['ip']] = (source, model)
+                    guide = 'riva' if source == 'cast' and cast.family(device) == 'riva' else source
+                    firmware_sources[device['ip']] = (source, model, guide)
                     break
             firmware = firmware_checks.inventory(candidates, at)
             for row in firmware:
-                source, model = catalog_models[row['ip']]
+                source, model, guide = firmware_sources[row['ip']]
                 catalog = catalogs.get(source, {}) if model else {}
                 latest = catalog.get('versions', {}).get(model)
                 row['adapter_id'] = source
+                row['guide_id'] = guide
                 row['catalog_id'] = source if model else None
                 row['catalog_checked_at'] = catalog.get('checked_at')
                 row['latest_stable'] = latest
