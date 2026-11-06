@@ -27,6 +27,7 @@ import network_names
 import media_readers
 import energy
 import reliability
+import routers
 from firmware import checks as firmware_checks
 from firmware.adapters import cast, nest, roku, shelly, sonos, wiim
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -708,6 +709,8 @@ class Collector:
     def __init__(self, store):
         self.firmware_catalog_locks = {source: threading.Lock() for source in FIRMWARE_CATALOGS}
         self.store = store
+        self.router_monitors = [routers.Monitor(store.path, adapter_id, adapter)
+                                for adapter_id, adapter in routers.ADAPTERS.items()]
         self.network = network_info()
         self.stop = threading.Event()
         self.poll_lock = threading.Lock()
@@ -990,6 +993,8 @@ class Handler(SimpleHTTPRequestHandler):
                     row['stable_status'] = 'unverified'
             data = {'devices': devices, 'rooms': self.store.rooms(), 'collector': self.collector.snapshot(),
                     'events': events, 'firmware': firmware, 'firmware_events': firmware_events}
+            if self.client_address[0] == '127.0.0.1':
+                data['router_monitoring'] = [monitor.snapshot() for monitor in self.collector.router_monitors]
             if DEV_RELOAD:
                 revision = [DEV_RELOAD]
                 for asset in WEB_ASSETS:
@@ -1170,7 +1175,26 @@ def main(argv=None, *, default_data=ROOT / '.data' / 'hearth.sqlite3', open_brow
     parser.add_argument('--data', type=Path, default=default_data)
     parser.add_argument('--no-collector', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--background', action='store_true', help='Enable managed logging and the collection watchdog.')
+    router_setup = parser.add_mutually_exclusive_group()
+    router_setup.add_argument('--router', nargs=2, metavar=('ADAPTER', 'ACTION'),
+                              help=f"Connect or disconnect a router adapter, then exit. Available: {', '.join(routers.ADAPTERS)}.")
+    router_setup.add_argument('--google-wifi', choices=('connect', 'disconnect'),
+                              help='Shortcut for --router google-wifi ACTION.')
     args = parser.parse_args(argv)
+    if args.router or args.google_wifi:
+        adapter_id, action = args.router or ('google-wifi', args.google_wifi)
+        adapter = routers.ADAPTERS.get(adapter_id)
+        if adapter is None:
+            parser.error(f'Unsupported router adapter. Available adapters: {", ".join(routers.ADAPTERS) or "none"}.')
+        if action not in ('connect', 'disconnect'):
+            parser.error('Router setup expects connect or disconnect.')
+        try:
+            adapter.configure(args.data, action)
+        except routers.RouterError as exc:
+            parser.exit(1, f'{exc}\n')
+        except (OSError, EOFError):
+            parser.exit(1, 'Router setup could not finish.\n')
+        return
     open_browser = open_browser and not args.background and not args.no_collector
     url = f'http://127.0.0.1:{args.port}'
     try:
@@ -1199,6 +1223,8 @@ def main(argv=None, *, default_data=ROOT / '.data' / 'hearth.sqlite3', open_brow
         if not args.no_collector:
             threading.Thread(target=collector.listen_sensors, daemon=True).start()
             threading.Thread(target=collector.run, daemon=True).start()
+            for monitor in collector.router_monitors:
+                threading.Thread(target=monitor.run, args=(collector.stop,), daemon=True).start()
             if args.background:
                 threading.Thread(target=collector.watchdog, daemon=True).start()
         port = httpd.server_port

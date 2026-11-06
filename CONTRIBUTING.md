@@ -45,6 +45,14 @@ For a Shelly Gen 1 device that uses the existing endpoints, add its exact `/shel
 3. Wire the adapter into the collector and firmware inventory in [`server.py`](server.py). Keep vendor parsing in the adapter so findings and alert deduplication work the same way for every device. Include new runtime files in the [background installer](background.py).
 4. Add redacted fixtures for a supported response and the relevant failure or unknown case. Include an available release and a response without one when the interface can report both. Use [the firmware tests](tests/test_firmware.py) as an example.
 
+## Add a router adapter
+
+1. Add a module under [`routers/adapters/`](routers/adapters/) and register its stable ID in [`routers/__init__.py`](routers/__init__.py). Use the [Google Wifi adapter](routers/adapters/google_wifi.py) as a reference. Add the file to [the macOS background installer](background.py) and document the supported models and setup in the README.
+2. Implement the [adapter contract](routers/monitor.py). Declare `NAME` and the `CAPABILITIES` the adapter can read. Implement `configure(database, action)` for the local CLI and `load_config(database)` so monitoring is off until configured. Keep credentials outside the database and API, and make disconnect remove the adapter's local configuration.
+3. Have `reader(config)` return a callable that reads and normalizes one snapshot. Report per-device internet upload and download in bits per second and pause as a boolean. Return `None` for missing or ambiguous readings and reserve zero for observed zero. If the selected model exposes fewer capabilities than the adapter supports, return a narrower `capabilities` tuple in the snapshot. The shared monitor handles polling, backoff, stale readings, and the Network page.
+4. Use bounded read-only requests. LAN adapters should target validated private IPv4 addresses and disable redirects and proxies. Document the endpoint and any required authentication. Use `RouterError` with a message safe for display. Reserve `unsupported` for a model the adapter has identified as incompatible, and use `setup_required` for configuration or authentication failures.
+5. Add synthetic or redacted fixtures for normal, incomplete, and failed reads. Include a test for any partial capability or model restriction and use a temporary database. The [router tests](tests/test_routers.py) show how to exercise the shared contract without contacting a router.
+
 ## Verify and submit
 
 Run these checks from the repo root before opening a pull request.

@@ -42,6 +42,25 @@ For Windows collector setup and the Briefcase installer previews, see the [packa
 
 Discovery can find devices that don't expose telemetry. Available fields depend on the device model and what its local API exposes. Devices that sleep or sit on another subnet may be missed by a scan. Last reported readings are shown separately from fresh ones, and internal board temperature is separate from room temperature.
 
+## Router monitoring
+
+The **Network** page can show per-device upload and download rates and internet pause status through optional read-only router adapters. The page lists the adapters available in your build. An adapter reports **Unsupported** for measurements it cannot provide and **Unknown** when an individual reading is missing. Local network discovery is available independently.
+
+The bundled adapter is **Google Wifi (experimental)**. You can request support for your router model or contribute an adapter. [Request support](https://github.com/alieneclectic/Local-Signal/issues/new) · [Add a router adapter](CONTRIBUTING.md#add-a-router-adapter)
+
+### Google Wifi monitoring (experimental)
+
+This adapter uses Google's unofficial cloud API to read one Google Wifi mesh. It refreshes about once a minute. Pause status reflects the device policy Google reports.
+
+1. Install the dependencies from `requirements.txt` in the collector's Python environment. If you use the virtual environment above, use `.venv/bin/python` in the next step.
+2. On the collector computer, open [Google sign-in](https://accounts.google.com/EmbeddedSetup) in a desktop browser and sign in with the Google account that manages the mesh. After accepting Google's terms, open the browser's developer tools. Under **Application → Storage → Cookies**, select `https://accounts.google.com` and copy the value of `oauth_token`.
+3. In a terminal, run `python3 server.py --router google-wifi connect`. Enter your email and paste the cookie at the hidden prompt. If Google lists multiple meshes, select the one to monitor.
+4. Open the dashboard on the collector computer at `http://localhost:8799/#network` (or the configured port). Router readings are available over loopback only.
+
+If the collector uses a custom or installed database, add `--data "/path/to/hearth.sqlite3"` to the setup command. The collector's `database_path` appears in its `/api/state` response. The collector picks up the connection automatically. To disconnect, use `--router google-wifi disconnect` with the same database. The earlier `--google-wifi connect` and `--google-wifi disconnect` commands still work.
+
+Setup stores a reusable Google credential in a private companion file next to the database. The credential itself can grant broader access than the dashboard uses. Use a database directory accessible only to your OS account and keep the file and sign-in cookie out of backups you share, screenshots, and chat. Disconnecting removes the local credential file. Google's undocumented API or sign-in flow can change. [Protocol reference](https://github.com/spkon/ha_google_wifi/blob/main/docs/API_ENDPOINTS.md)
+
 ## Data and network access
 
 Device access is read-only. Local Signal can report relay, playback, and firmware status; labels and settings are saved in its own database. Firmware checks may fetch public vendor release information without sending device data.
@@ -56,7 +75,7 @@ Start with the [contributor guide](CONTRIBUTING.md) for a local preview, tests, 
 
 ## Data and implementation
 
-[server.py](server.py) serves the API and dashboard, collects readings, and writes to SQLite. The frontend lives in [web/](web/) and uses plain HTML, CSS, and JavaScript. [media_readers.py](media_readers.py) handles local media status, [firmware/](firmware/) contains firmware adapters, and [tests/](tests/) covers collection, storage, and device behavior.
+[server.py](server.py) serves the API and dashboard, collects readings, and writes to SQLite. The frontend lives in [web/](web/) and uses plain HTML, CSS, and JavaScript. [media_readers.py](media_readers.py) handles local media status. [firmware/](firmware/) and [routers/](routers/) contain their respective adapters. [tests/](tests/) covers collection, storage, and device behavior.
 
 ## License
 

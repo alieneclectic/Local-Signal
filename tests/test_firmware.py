@@ -298,7 +298,7 @@ class FirmwareFindingTests(unittest.TestCase):
              patch.object(server.media_readers, 'read_xml', return_value=description):
             self.store.record(FIRST_IP, server.probe_device(device))
 
-        handler = Mock(store=self.store, path='/api/state')
+        handler = Mock(store=self.store, path='/api/state', client_address=('192.168.1.4', 12345))
         handler.valid_host.return_value = True
         handler.collector.snapshot.return_value = {}
         saved, = [d for d in self.store.devices() if d['ip'] == FIRST_IP]
@@ -327,7 +327,7 @@ class FirmwareFindingTests(unittest.TestCase):
             'advertised_names': [{'source': 'Local DNS', 'name': 'riva-festival-example'}],
             'firmware_check': check, 'firmware_model': 'RIVA Festival', 'firmware_peer_mac': check['device_id'],
         })
-        handler = Mock(store=self.store, path='/api/state')
+        handler = Mock(store=self.store, path='/api/state', client_address=('192.168.1.4', 12345))
         handler.valid_host.return_value = True
         handler.collector.snapshot.return_value = {}
         server.Handler.do_GET(handler)
