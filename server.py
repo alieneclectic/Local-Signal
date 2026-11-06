@@ -1036,7 +1036,7 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if parsed.path.startswith('/api/'):
             return self.send_json({'error': 'Endpoint not found.'}, 404)
-        if parsed.path not in ('/', '/index.html', '/app.js', '/style.css', '/favicon.svg'):
+        if parsed.path not in ('/', '/index.html', '/app.js', '/theme.js', '/style.css', '/favicon.svg'):
             return self.send_json({'error': 'File not found.'}, 404)
         super().do_GET()
 
