@@ -25,10 +25,15 @@ if permissionSocket >= 0 {
 }
 let child = Process()
 child.executableURL = support.appendingPathComponent(".venv/bin/python")
-child.arguments = ["-u", support.appendingPathComponent("runtime/server.py").path,
-                   "--host", "0.0.0.0", "--data",
-                   support.appendingPathComponent("data/hearth.sqlite3").path, "--background"]
-child.currentDirectoryURL = support.appendingPathComponent("runtime")
+let runtime = support.appendingPathComponent("runtime")
+let collectorArgs = ["--host", "0.0.0.0", "--port", "8799", "--data",
+                     support.appendingPathComponent("data/hearth.sqlite3").path, "--background"]
+if let checkout = ProcessInfo.processInfo.environment["LOCAL_SIGNAL_CHECKOUT"] {
+    child.arguments = ["-u", runtime.appendingPathComponent("dev.py").path, "--checkout", checkout] + collectorArgs
+} else {
+    child.arguments = ["-u", runtime.appendingPathComponent("server.py").path] + collectorArgs
+}
+child.currentDirectoryURL = runtime
 signal(SIGTERM, SIG_IGN)
 signal(SIGINT, SIG_IGN)
 let termination = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())

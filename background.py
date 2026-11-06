@@ -21,6 +21,7 @@ SUPPORT = Path.home() / 'Library' / 'Application Support' / 'Hearth'
 PLIST = Path.home() / 'Library' / 'LaunchAgents' / f'{LABEL}.plist'
 DOMAIN = f'gui/{os.getuid()}' if sys.platform == 'darwin' else None
 FILES = ['server.py', 'coiot.py', 'network_names.py', 'media_readers.py', 'energy.py', 'reliability.py', 'background.py', 'requirements.txt', 'macos/Collector.swift']
+FILES += ['dev.py']
 FILES += ['routers/__init__.py', 'routers/monitor.py', 'routers/adapters/__init__.py', 'routers/adapters/google_wifi.py']
 FILES += ['firmware/__init__.py', 'firmware/checks.py', 'firmware/adapters/__init__.py',
           'firmware/adapters/shelly.py', 'firmware/adapters/wiim.py', 'firmware/adapters/sonos.py',
@@ -29,13 +30,16 @@ FILES += ['firmware/__init__.py', 'firmware/checks.py', 'firmware/adapters/__ini
 SYSTEM_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
 
 
-def agent_config(python, runtime, data, launcher=None, *, label=LABEL, launcher_args=()):
+def agent_config(python, runtime, data, launcher=None, *, label=LABEL, launcher_args=(), checkout=None):
     arguments = [str(launcher), *launcher_args] if launcher else [str(python), '-u', str(runtime / 'server.py'),
                                                  '--host', '0.0.0.0', '--data', str(data), '--background']
+    env = {'PATH': SYSTEM_PATH, 'PYTHONUNBUFFERED': '1'}
+    if checkout is not None:
+        env['LOCAL_SIGNAL_CHECKOUT'] = str(checkout)
     return {'Label': label, 'ProgramArguments': arguments, 'AssociatedBundleIdentifiers': [label],
             'WorkingDirectory': str(runtime), 'RunAtLoad': True, 'KeepAlive': True,
             'ThrottleInterval': 15, 'ProcessType': 'Background',
-            'EnvironmentVariables': {'PATH': SYSTEM_PATH, 'PYTHONUNBUFFERED': '1'},
+            'EnvironmentVariables': env,
             'StandardOutPath': str(data.parent / 'logs' / 'launchd.log'),
             'StandardErrorPath': str(data.parent / 'logs' / 'launchd.log'), 'Umask': 0o077}
 
@@ -109,10 +113,16 @@ def copy_database(source, target):
         temporary.unlink(missing_ok=True)
 
 
-def install():
+def install(follow_checkout=None):
     if sys.platform != 'darwin':
         raise RuntimeError('The background installer requires macOS.')
     os.umask(0o077)
+    old_plist = PLIST.read_bytes() if PLIST.exists() else None
+    checkout = None
+    if follow_checkout is True:
+        checkout = ROOT
+    elif follow_checkout is None and old_plist:
+        checkout = plistlib.loads(old_plist).get('EnvironmentVariables', {}).get('LOCAL_SIGNAL_CHECKOUT')
     SUPPORT.mkdir(parents=True, exist_ok=True)
     data_dir = SUPPORT / 'data'
     (data_dir / 'logs').mkdir(parents=True, exist_ok=True)
@@ -151,7 +161,6 @@ def install():
     runtime = SUPPORT / 'runtime'
     previous = SUPPORT / 'runtime.previous'
     app, previous_app = SUPPORT / 'Hearth.app', SUPPORT / 'Hearth.previous.app'
-    old_plist = PLIST.read_bytes() if PLIST.exists() else None
     try:
         copy_database(ROOT / '.data' / 'hearth.sqlite3', data)
         if previous.exists():
@@ -167,7 +176,8 @@ def install():
         subprocess.run(['/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister', '-f', str(app)], check=True)
         PLIST.parent.mkdir(parents=True, exist_ok=True)
         temporary_plist = PLIST.with_suffix('.tmp')
-        temporary_plist.write_bytes(plistlib.dumps(agent_config(python, runtime, data, app / 'Contents/MacOS/Hearth')))
+        temporary_plist.write_bytes(plistlib.dumps(
+            agent_config(python, runtime, data, app / 'Contents/MacOS/Hearth', checkout=checkout)))
         temporary_plist.replace(PLIST)
         launchctl('enable', f'{DOMAIN}/{LABEL}')
         launchctl('bootstrap', DOMAIN, str(PLIST))
@@ -205,11 +215,16 @@ def install():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['install', 'status', 'uninstall'])
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--follow-checkout', action='store_true', help='Reload code from this checkout as it changes.')
+    mode.add_argument('--installed-snapshot', dest='follow_checkout', action='store_false',
+                      help='Run the installed copy until the next manual update.')
+    parser.set_defaults(follow_checkout=None)
     args = parser.parse_args()
     if sys.platform != 'darwin':
         parser.error('The background installer requires macOS.')
     if args.action == 'install':
-        install()
+        install(args.follow_checkout)
     elif args.action == 'status':
         result = launchctl('print', f'{DOMAIN}/{LABEL}', check=False)
         print(result.stdout if result.returncode == 0 else 'Background collector is not loaded.')

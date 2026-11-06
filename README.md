@@ -27,7 +27,9 @@ python3 -m venv .venv
 .venv/bin/python server.py
 ```
 
-On macOS, [install-background.command](install-background.command) can set up collection at login. It requires Xcode's Swift compiler and an Apple code signing identity. The running collector keeps up to seven daily database snapshots locally; check **Settings** for collection and backup status.
+On macOS, [install-background.command](install-background.command) can set up collection at login. It requires Xcode's Swift compiler and an Apple code signing identity. The running collector keeps up to seven daily database snapshots locally. Check **Settings** for the code source and collection and backup status.
+
+Run `./install-background.command --follow-checkout` if you want the background collector at port 8799 to follow edits in this checkout. It reloads the page after frontend edits and restarts collection after backend edits. The collector uses the installed snapshot when the checkout is unavailable or fails to load. Both sources use the same installed history. Rerun the installer when dependencies or the launcher change. Use `--installed-snapshot` to switch back to manual updates.
 
 For Windows collector setup and the Briefcase installer previews, see the [packaging guide](packaging/README.md).
 

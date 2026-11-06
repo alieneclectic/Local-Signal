@@ -1220,6 +1220,9 @@ def main(argv=None, *, default_data=ROOT / '.data' / 'hearth.sqlite3', open_brow
         httpd.store = Store(args.data)
         collector = httpd.collector = Collector(httpd.store)
         collector.state['background'] = args.background
+        code_source = os.environ.get('LOCAL_SIGNAL_CODE_SOURCE')
+        if code_source or args.background:
+            collector.state['code_source'] = code_source or 'installed'
         if not args.no_collector:
             threading.Thread(target=collector.listen_sensors, daemon=True).start()
             threading.Thread(target=collector.run, daemon=True).start()
