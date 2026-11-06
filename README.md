@@ -44,6 +44,8 @@ For Windows collector setup and the Briefcase installer previews, see the [packa
 
 Discovery can find devices that don't expose telemetry. Available fields depend on the device model and what its local API exposes. Devices that sleep or sit on another subnet may be missed by a scan. Last reported readings are shown separately from fresh ones, and internal board temperature is separate from room temperature.
 
+Devices identified by a LiftMaster or myQ name show **Manual check** under **Devices → Firmware**. Expand the card for instructions on looking up the firmware version in the myQ app.
+
 ## Router monitoring
 
 The **Network** page can show per-device upload and download rates and internet pause status through optional read-only router adapters. The page lists the adapters available in your build. An adapter reports **Unsupported** for measurements it cannot provide and **Unknown** when an individual reading is missing. Local network discovery is available independently.
