@@ -98,20 +98,18 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #111a15;
-  --paper: #1b2620;
-  --chrome: #17221b;
-  --ink: #e9f1e9;
-  --muted: #afc0b1;
-  --green: #b4dcae;
-  --line: #37483c;
-  --control-border: #657e6c;
-  --sage: #293b2e;
-  --warm: #3c3020;
+  --bg: #191919;
+  --paper: #292929;
+  --chrome: #222222;
+  --ink: #ededed;
+  --muted: #b5b5b5;
+  --green: #d1d1d1;
+  --line: #414141;
+  --control-border: #7a7a7a;
+  --sage: #333333;
   --warning: #f1cb8e;
   --danger: #fac2b4;
-  --danger-surface: #412b27;
-  --chart-grid: #405246;
+  --chart-grid: #484848;
   --chart-series-1: #8fd6a5;
   --chart-series-2: #d4dc84;
   --chart-series-3: #f5b889;
@@ -126,12 +124,15 @@
   background: var(--chrome);
   border-color: var(--line);
 }
+:root[data-theme="dark"] :is(.brand-icon, .mobile-brand) img {
+  filter: grayscale(1);
+}
 :root[data-theme="dark"] :is(.workspace-card, .stat-card, .device-card) {
   background: var(--paper);
 }
 :root[data-theme="dark"] :is(
   .local-card, .stat-card.highlight, .insight-panel, .notice, .discovered-identity,
-  .detail-metrics > div, .raw-details pre
+  .detail-metrics > div, .raw-details pre, .toast
 ) {
   background: var(--sage);
   border-color: var(--line);
@@ -170,7 +171,7 @@
   .breadcrumb strong, .highlight .stat-value, .chart-empty strong, .legend-item strong,
   .activity-row p, .insight-panel h3, .table-device, .settings-list dd, .setting-choice strong,
   .supported-apis h3, .supported-apis strong, .detail-metrics strong, .device-info-list dd,
-  .detail-edit-heading h3, .discovered-identity p, .raw-details pre
+  .detail-edit-heading h3, .discovered-identity p, .raw-details pre, .toast
 ) { color: var(--ink); }
 :root[data-theme="dark"] :is(
   .local-symbol, .live-pill, .icon-button, .eyebrow, .chart-empty > .icon, .text-button,
@@ -190,7 +191,7 @@
 }
 :root[data-theme="dark"] .device-card:hover { border-color: var(--control-border); }
 :root[data-theme="dark"] .button.primary { color: var(--bg); }
-:root[data-theme="dark"] .button.primary:hover { background: #caeac6; }
+:root[data-theme="dark"] .button.primary:hover { background: var(--ink); }
 :root[data-theme="dark"] :is(.button.secondary, .select-wrap, .segmented, .search-field, input:not([type=checkbox]), textarea) {
   background: var(--chrome);
   border-color: var(--control-border);
@@ -204,11 +205,14 @@
   background: var(--green);
   color: var(--bg);
 }
+:root[data-theme="dark"] :is(button, a, input, select, summary, textarea):focus-visible {
+  outline-color: var(--green);
+}
 :root[data-theme="dark"] :is(.select-wrap, .search-field):focus-within {
   outline: 3px solid var(--green);
   outline-offset: 2px;
 }
-:root[data-theme="dark"] dialog::backdrop { background: #080d0acc; }
+:root[data-theme="dark"] dialog::backdrop { background: #0a0a0acc; }
 :root[data-theme="dark"] .form-error { color: var(--danger); }
 :root[data-theme="dark"] .loading-ring {
   border-color: var(--line);
@@ -224,15 +228,12 @@
 }
 :root[data-theme="dark"] .status-badge.online { color: var(--green); }
 :root[data-theme="dark"] :is(.status-badge.reachable, .status-badge.attention, .status-badge.release-published, .notice.warning) {
-  background: var(--warm);
   color: var(--warning);
 }
 :root[data-theme="dark"] :is(.status-badge.offline, .status-badge.update-needed, .toast.error) {
-  background: var(--danger-surface);
   color: var(--danger);
 }
 :root[data-theme="dark"] .status-badge.sleeping {
-  background: #332a42;
   color: #dcc6f2;
 }
 :root[data-theme="dark"] .live-pill.disconnected { color: var(--warning); }
