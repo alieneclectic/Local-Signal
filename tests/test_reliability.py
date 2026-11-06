@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 import background
+import dev
 import reliability
 import server
 
@@ -52,6 +53,28 @@ class BackupTests(unittest.TestCase):
         signed = background.agent_config(root / '.venv/bin/python', root / 'runtime', root / 'data/hearth.sqlite3', root / 'Hearth.app/Contents/MacOS/Hearth')
         self.assertEqual(signed['AssociatedBundleIdentifiers'], [background.LABEL])
         self.assertEqual(signed['ProgramArguments'], [str(root / 'Hearth.app/Contents/MacOS/Hearth')])
+
+    def test_checkout_is_optional_and_preserves_the_installed_working_directory(self):
+        root = Path('/Users/example/Library/Application Support/Hearth')
+        checkout = Path('/Volumes/Projects/Local Signal')
+        config = background.agent_config(root / '.venv/bin/python', root / 'runtime', root / 'data/hearth.sqlite3',
+                                         root / 'Hearth.app/Contents/MacOS/Hearth', checkout=checkout)
+        self.assertEqual(config['WorkingDirectory'], str(root / 'runtime'))
+        self.assertEqual(config['EnvironmentVariables']['LOCAL_SIGNAL_CHECKOUT'], str(checkout))
+        self.assertIn('dev.py', background.FILES)
+
+    def test_unavailable_checkout_uses_the_installed_backend(self):
+        with tempfile.TemporaryDirectory() as folder:
+            checkout = Path(folder)
+            with patch.object(dev, 'ROOT', checkout / 'installed'), patch.object(dev, 'backend_snapshot') as snapshot:
+                source, _ = dev.checkout_snapshot(checkout)
+                self.assertEqual(source, dev.ROOT)
+                snapshot.assert_called_once_with(dev.ROOT)
+                (checkout / 'server.py').touch()
+                (checkout / 'web').mkdir()
+                (checkout / 'web/index.html').touch()
+                source, _ = dev.checkout_snapshot(checkout)
+                self.assertEqual(source, checkout)
 
 
 class CollectionRecoveryTests(unittest.TestCase):

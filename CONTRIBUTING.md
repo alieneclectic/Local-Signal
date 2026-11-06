@@ -22,7 +22,7 @@ Open [the local preview](http://127.0.0.1:8800/). The dashboard reloads on its n
 
 The command above starts with an empty inventory and skips automatic polling and the sensor listener. Manual actions such as **Refresh**, **Scan network**, **Refresh names**, and **Add device** can still contact the network. Leave those controls alone for a UI-only preview. For development with live collection, run `python3 dev.py` with maintainer authorization. It uses the separate `.data/dev/hearth.sqlite3` database, polls known devices every 30 seconds after the previous cycle finishes, and scans for new devices when you select **Scan network**.
 
-The macOS background collector at `http://127.0.0.1:8799` serves an installed copy, which `start.command` opens when it is running. Use the development URL to see edits from this checkout.
+The macOS background collector at `http://127.0.0.1:8799` serves an installed copy by default, which `start.command` opens when it is running. Use the development URL for a separate preview database. Run `./install-background.command --follow-checkout` to have the background collector follow this checkout with the installed database. The code source is shown in **Settings**.
 
 ## Working with an LLM
 
