@@ -42,6 +42,7 @@
 .inventory-card-details .text-button { margin-top: 8px; }
 .inventory-recency { font-size: 10px; }
 .device-firmware { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.device-firmware-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .device-firmware h3 { font-size: 12px; }
 .device-firmware p, .firmware-versions dt, .firmware-explainer { font-size: 11px; line-height: 1.5; }
 .firmware-badge.status-badge { font-size: 10px; color: #5a6457; }

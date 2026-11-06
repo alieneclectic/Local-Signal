@@ -6,6 +6,7 @@ import argparse
 import concurrent.futures
 import csv
 from datetime import datetime, timezone
+import errno
 import io
 import ipaddress
 import json
@@ -20,6 +21,7 @@ import sqlite3
 import subprocess
 import threading
 import time
+import webbrowser
 import coiot
 import network_names
 import media_readers
@@ -71,10 +73,38 @@ def csv_value(value):
     return value
 
 
+def windows_command(program, *args, timeout):
+    system32 = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32'
+    return subprocess.run([str(system32 / f'{program}.exe'), *args],
+                          capture_output=True, text=True, errors='replace', timeout=timeout,
+                          creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+
+
+def windows_default_route():
+    routes = windows_command('route', 'print', '-4', timeout=3).stdout
+    candidates = []
+    for line in routes.splitlines():
+        fields = line.split()
+        if len(fields) != 5 or fields[:2] != ['0.0.0.0', '0.0.0.0']:
+            continue
+        try:
+            gateway, source = local_ip(fields[2]), local_ip(fields[3])
+            candidates.append((int(fields[4]), gateway, source))
+        except ValueError:
+            continue
+    if candidates:
+        _, gateway, source = min(candidates)
+        return {'gateway': gateway, 'local_ip': source, 'interface': None}
+    return {}
+
+
 def network_info():
     info = {'gateway': None, 'local_ip': None, 'interface': None, 'subnet': None}
     try:
-        if platform.system() == 'Darwin':
+        system = platform.system()
+        if system == 'Windows':
+            info.update(windows_default_route())
+        elif system == 'Darwin':
             out = subprocess.run(['route', '-n', 'get', 'default'], capture_output=True, text=True, timeout=3).stdout
             for key in ('gateway', 'interface'):
                 match = re.search(rf'{key}:\s*(\S+)', out)
@@ -118,11 +148,20 @@ def read_json(ip, path, timeout=2):
 
 
 def ping(ip):
-    command = ['ping', '-n', '-c', '1', '-W', '850' if platform.system() == 'Darwin' else '1', ip]
+    system = platform.system()
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=2)
-        match = re.search(r'time[=<]([\d.]+)\s*ms', result.stdout)
-        return result.returncode == 0, float(match.group(1)) if match else None
+        if system == 'Windows':
+            result = windows_command('ping', '-4', '-n', '1', '-w', '850', ip, timeout=2)
+            # Windows can exit successfully for an ICMP unreachable response.
+            if not re.search(r'\bTTL=\d+\b', result.stdout, re.I):
+                return False, None
+        else:
+            command = ['ping', '-n', '-c', '1', '-W', '850' if system == 'Darwin' else '1', ip]
+            result = subprocess.run(command, capture_output=True, text=True, timeout=2)
+        if result.returncode:
+            return False, None
+        match = re.search(r'\btime[=<]([\d.]+)\s*ms', result.stdout, re.I)
+        return True, float(match.group(1)) if match else None
     except (OSError, subprocess.SubprocessError):
         return False, None
 
@@ -135,17 +174,24 @@ def port_open(ip, port=80):
         return False
 
 
-def arp_entries():
+def arp_entries(interface_ip=None):
     try:
-        result = subprocess.run(['arp', '-an'], capture_output=True, text=True, timeout=4)
+        if platform.system() == 'Windows':
+            if not interface_ip:
+                return {}
+            result = windows_command('arp', '-a', '-N', interface_ip, timeout=4)
+            pattern = r'^\s*(\d+\.\d+\.\d+\.\d+)\s+((?:[0-9a-f]{2}-){5}[0-9a-f]{2})\s'
+        else:
+            result = subprocess.run(['arp', '-an'], capture_output=True, text=True, timeout=4)
+            pattern = r'\((\d+\.\d+\.\d+\.\d+)\) at ([0-9a-f:]+)'
         found = {}
         for line in result.stdout.splitlines():
-            match = re.search(r'\((\d+\.\d+\.\d+\.\d+)\) at ([0-9a-f:]+)', line, re.I)
+            match = re.search(pattern, line, re.I)
             if match:
                 try:
                     ip = local_ip(match[1])
-                    mac = ':'.join(x.zfill(2) for x in match[2].split(':')).upper()
-                    if len(mac) == 17 and mac != 'FF:FF:FF:FF:FF:FF':
+                    mac = ':'.join(x.zfill(2) for x in match[2].replace('-', ':').split(':')).upper()
+                    if len(mac) == 17 and mac not in ('00:00:00:00:00:00', 'FF:FF:FF:FF:FF:FF'):
                         found[ip] = mac
                 except ValueError:
                     pass
@@ -827,7 +873,7 @@ class Collector:
                     if future.result()[0]:
                         reachable.add(futures[future])
                     self.state['scan_progress'] += 1
-            entries = arp_entries()
+            entries = arp_entries(network.get('local_ip'))
             # ARP cache membership is discovery evidence, not evidence a host is online now.
             targets = reachable | {ip for ip in entries if ipaddress.ip_address(ip) in subnet}
             for ip in sorted(targets, key=ipaddress.ip_address):
@@ -1091,46 +1137,68 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 class LocalHTTPServer(ThreadingHTTPServer):
+    allow_reuse_address = os.name != 'nt'
+
     def server_bind(self):
         # HTTPServer normally reverse-resolves the bind address; home DNS can block
         # startup for minutes. The dashboard never needs a resolved server name.
+        if os.name == 'nt':
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         socketserver.TCPServer.server_bind(self)
         self.server_name = self.server_address[0]
         self.server_port = self.server_address[1]
 
 
-def main():
+def main(argv=None, *, default_data=ROOT / '.data' / 'hearth.sqlite3', open_browser=False):
     parser = argparse.ArgumentParser(description='Local Signal device monitoring dashboard')
     parser.add_argument('--host', default='127.0.0.1', choices=['127.0.0.1', '0.0.0.0'], help='Use 0.0.0.0 to allow access from the trusted local network.')
     parser.add_argument('--port', type=int, default=8799)
-    parser.add_argument('--data', default=str(ROOT / '.data' / 'hearth.sqlite3'))
+    parser.add_argument('--data', type=Path, default=default_data)
     parser.add_argument('--no-collector', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--background', action='store_true', help='Enable managed logging and the collection watchdog.')
-    args = parser.parse_args()
-    if args.background:
-        os.umask(0o077)
-        reliability.configure_logging(Path(args.data).parent / 'logs')
-    store = Store(args.data)
-    collector = Collector(store)
-    collector.state['background'] = args.background
-    server = LocalHTTPServer((args.host, args.port), Handler)
-    server.store = store
-    server.collector = collector
-    if not args.no_collector:
-        threading.Thread(target=collector.listen_sensors, daemon=True).start()
-        threading.Thread(target=collector.run, daemon=True).start()
-        if args.background:
-            threading.Thread(target=collector.watchdog, daemon=True).start()
-    print(f'Local Signal is ready at http://localhost:{args.port}', flush=True)
-    if args.host == '0.0.0.0' and collector.network.get('local_ip'):
-        print(f'Local network access: http://{collector.network["local_ip"]}:{args.port}', flush=True)
+    args = parser.parse_args(argv)
+    open_browser = open_browser and not args.background and not args.no_collector
+    url = f'http://127.0.0.1:{args.port}'
     try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        collector.stop.set()
-        server.server_close()
+        httpd = LocalHTTPServer((args.host, args.port), Handler)
+    except OSError as exc:
+        port_conflict = exc.errno in (errno.EADDRINUSE, errno.EACCES) or getattr(exc, 'winerror', None) in (10048, 10013)
+        if open_browser and port_conflict:
+            # The installed shortcut also opens the dashboard if the login task
+            # already owns this port. Do not open an unrelated local server.
+            try:
+                with build_opener(ProxyHandler({}), NoRedirects()).open(url + '/api/state', timeout=2) as response:
+                    state = json.load(response)
+                if Path(state['collector']['database_path']) == args.data.resolve():
+                    webbrowser.open(url)
+                    return
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+        raise
+    with httpd:
+        if args.background:
+            os.umask(0o077)
+            reliability.configure_logging(args.data.parent / 'logs')
+        httpd.store = Store(args.data)
+        collector = httpd.collector = Collector(httpd.store)
+        collector.state['background'] = args.background
+        if not args.no_collector:
+            threading.Thread(target=collector.listen_sensors, daemon=True).start()
+            threading.Thread(target=collector.run, daemon=True).start()
+            if args.background:
+                threading.Thread(target=collector.watchdog, daemon=True).start()
+        port = httpd.server_port
+        print(f'Local Signal is ready at http://localhost:{port}', flush=True)
+        if args.host == '0.0.0.0' and collector.network.get('local_ip'):
+            print(f'Local network access: http://{collector.network["local_ip"]}:{port}', flush=True)
+        if open_browser:
+            threading.Thread(target=webbrowser.open, args=(f'http://127.0.0.1:{port}',), daemon=True).start()
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            collector.stop.set()
 
 
 if __name__ == '__main__':

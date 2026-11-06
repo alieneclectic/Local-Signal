@@ -1,1 +1,2 @@
 PyChromecast==14.0.10
+tzdata==2026.6; sys_platform == "win32"

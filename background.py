@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent
 LABEL = 'local.hearth.collector'
 SUPPORT = Path.home() / 'Library' / 'Application Support' / 'Hearth'
 PLIST = Path.home() / 'Library' / 'LaunchAgents' / f'{LABEL}.plist'
-DOMAIN = f'gui/{os.getuid()}'
+DOMAIN = f'gui/{os.getuid()}' if sys.platform == 'darwin' else None
 FILES = ['server.py', 'coiot.py', 'network_names.py', 'media_readers.py', 'energy.py', 'reliability.py', 'background.py', 'requirements.txt', 'macos/Collector.swift']
 FILES += ['firmware/__init__.py', 'firmware/checks.py', 'firmware/adapters/__init__.py',
           'firmware/adapters/shelly.py', 'firmware/adapters/wiim.py', 'firmware/adapters/sonos.py',
@@ -28,10 +28,10 @@ FILES += ['firmware/__init__.py', 'firmware/checks.py', 'firmware/adapters/__ini
 SYSTEM_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
 
 
-def agent_config(python, runtime, data, launcher=None):
-    arguments = [str(launcher)] if launcher else [str(python), '-u', str(runtime / 'server.py'),
+def agent_config(python, runtime, data, launcher=None, *, label=LABEL, launcher_args=()):
+    arguments = [str(launcher), *launcher_args] if launcher else [str(python), '-u', str(runtime / 'server.py'),
                                                  '--host', '0.0.0.0', '--data', str(data), '--background']
-    return {'Label': LABEL, 'ProgramArguments': arguments, 'AssociatedBundleIdentifiers': [LABEL],
+    return {'Label': label, 'ProgramArguments': arguments, 'AssociatedBundleIdentifiers': [label],
             'WorkingDirectory': str(runtime), 'RunAtLoad': True, 'KeepAlive': True,
             'ThrottleInterval': 15, 'ProcessType': 'Background',
             'EnvironmentVariables': {'PATH': SYSTEM_PATH, 'PYTHONUNBUFFERED': '1'},
@@ -205,6 +205,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['install', 'status', 'uninstall'])
     args = parser.parse_args()
+    if sys.platform != 'darwin':
+        parser.error('The background installer requires macOS.')
     if args.action == 'install':
         install()
     elif args.action == 'status':
