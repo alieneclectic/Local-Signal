@@ -14,7 +14,8 @@ ROOT = Path(__file__).resolve().parent
 
 
 def backend_snapshot():
-    paths = [*ROOT.glob('*.py'), *ROOT.glob('firmware/**/*.py'), *ROOT.glob('firmware/catalog/*.json')]
+    paths = [*ROOT.glob('*.py'), *ROOT.glob('firmware/**/*.py'), *ROOT.glob('firmware/catalog/*.json'),
+             *ROOT.glob('routers/**/*.py')]
     snapshot = {}
     for path in paths:
         if path == ROOT / 'dev.py':

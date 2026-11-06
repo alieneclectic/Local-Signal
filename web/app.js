@@ -108,7 +108,7 @@ async function load(force=false) {
    for(const source of sources) refreshFirmwareCatalog(source);
   }
   if(alerts.length) toast(alerts.length===1?alerts[0].message:`${alerts.length} firmware updates reported. See Devices for details.`);
- } catch(e) { state.connected=false; updateChrome(); if(state.initial) $('#main').innerHTML=`<div class="empty-state large">${icon('server')}<h1>The collector is taking a moment.</h1><p>Keep the Local Signal server running, then refresh the page.</p><button class="button primary" id="retry-load">Try again</button></div>`; else if(state.page==='devices') render(); }
+ } catch(e) { state.connected=false; updateChrome(); if(state.initial) $('#main').innerHTML=`<div class="empty-state large">${icon('server')}<h1>The collector is taking a moment.</h1><p>Keep the Local Signal server running, then refresh the page.</p><button class="button primary" id="retry-load">Try again</button></div>`; else if(state.page==='devices'||state.page==='network') render(); }
  finally { loading=false; }
 }
 async function refreshFirmwareCatalog(source) {
@@ -369,9 +369,51 @@ function devicesPage() {
 function historyPage() {
  return `${heading('History', 'Explore collected device readings and download the data.',false,'DEVICE READINGS')}${connectionBanner()}${chartPanel()}`;
 }
+function routerRate(bps) {
+ if(!Number.isFinite(bps)) return 'Unknown';
+ if(bps>=1e6) return `${fmt(bps/1e6,2)} Mbps`;
+ if(bps>=1e3) return `${fmt(bps/1e3,1)} kbps`;
+ return `${fmt(bps,1)} bps`;
+}
+const routerSupportLinks = '<a href="https://github.com/alieneclectic/Local-Signal/issues/new">Request support</a> or <a href="https://github.com/alieneclectic/Local-Signal/blob/main/CONTRIBUTING.md#add-a-router-adapter">contribute an adapter</a>.';
+const routerConnectCommand = id => `<code>python3 server.py --router ${esc(id)} connect</code>`;
+function routerPanel(router) {
+ const ready=router.status==='ready';
+ const titles={starting:'Waiting for the first reading',unavailable:'Readings unavailable',setup_required:'Setup required',unsupported:'Router unsupported'};
+ const supported=field=>router.capabilities.includes(field);
+ const rows=ready?router.devices:[];
+ return `<section class="panel router-monitoring">
+  <div class="panel-heading"><div><h2>${esc(router.name)}</h2><p>${ready?`Read-only router monitoring · Last checked ${dateTime(router.checked_at)}`:esc(titles[router.status])}</p></div>${icon('wifi')}</div>
+  ${router.message?`<p class="collection-note">${esc(router.message)}</p>`:''}
+  ${router.status==='setup_required'?`<p class="collection-note">On the collector computer, run ${routerConnectCommand(router.id)}.</p>`:''}
+  ${router.status==='unsupported'?`<p class="collection-note">${routerSupportLinks}</p>`:''}
+  ${rows.length?`<div class="table-scroll"><table>
+   <thead><tr><th scope="col">Device</th><th scope="col">Upload</th><th scope="col">Download</th><th scope="col">Internet pause</th></tr></thead>
+   <tbody>${rows.map(d=>`<tr>
+    <th scope="row"><strong>${esc(d.name)}</strong>${d.ip?`<small class="mono muted">${esc(d.ip)}</small>`:''}</th>
+    <td>${supported('upload_bps')?routerRate(d.upload_bps):'Unsupported'}</td>
+    <td>${supported('download_bps')?routerRate(d.download_bps):'Unsupported'}</td>
+    <td>${!supported('paused')?'Unsupported':d.paused===true?'Paused':d.paused===false?'Not paused':'Unknown'}</td>
+   </tr>`).join('')}</tbody>
+  </table></div>`:ready?`<p class="collection-note">The router returned no devices.</p>`:''}
+ </section>`;
+}
+function routerMonitoring() {
+ if(!state.connected) return '';
+ const routers=state.router_monitoring;
+ if(!routers) return `<div class="notice router-monitoring">${icon('wifi')}Router monitoring is available on the collector computer. Open the Network page using localhost.</div>`;
+ const active=routers.filter(router=>router.status!=='disabled');
+ if(active.length) return active.map(routerPanel).join('');
+ return `<section class="panel router-monitoring">
+  <div class="panel-heading"><div><h2>Router monitoring</h2><p>Optional · Off</p></div>${icon('wifi')}</div>
+  <p class="collection-note">Internet traffic and device pause status require a compatible router adapter. Use the Network inventory below to discover local devices.</p>
+  ${routers.length?`<ul class="collection-note router-options">${routers.map(router=>`<li><strong>${esc(router.name)}</strong> ${routerConnectCommand(router.id)}</li>`).join('')}</ul>`:`<p class="collection-note">This build has no router adapters.</p>`}
+  <p class="collection-note">No adapter for your router? ${routerSupportLinks}</p>
+ </section>`;
+}
 function networkPage() {
  const net=state.collector.network;
- return `${heading('Network', 'Discover devices and check how they connect to the collector.',true,'LOCAL NETWORK')}${connectionBanner()}${scanBanner()}<section class="network-info-grid">${statCard('Local subnet',esc(net.subnet||'Unknown'),'Discovery limited to this /24 network','network')}${statCard('Gateway',esc(net.gateway||'Unknown'),'Default route for this network','wifi')}${statCard('Collector IP',esc(net.local_ip||'Unknown'),`${esc(net.interface||'Local network address')}`,'server')}</section><section class="panel"><div class="panel-heading"><div><h2>Network inventory</h2><p>${state.devices.length} devices saved · Last scan ${timeAgo(state.collector.last_scan)} · Names ${timeAgo(state.collector.last_name_discovery)}</p></div><div class="network-actions"><button class="text-button names-button" ${state.collector.naming?'disabled':''}>${icon('search')}${state.collector.naming?'Finding names…':'Refresh names'}</button><button class="text-button scan-button" ${state.collector.scanning?'disabled':''}>${icon('scan')}Scan again</button></div></div><div class="table-scroll"><table><thead><tr><th>Device</th><th>IP address</th><th>Hardware address</th><th>Connection</th><th>Telemetry API</th><th>Last seen</th><th></th></tr></thead><tbody>${state.devices.map(d=>`<tr><td><button class="table-device" data-device="${esc(d.ip)}">${icon(deviceIcon(d))}<span><strong>${esc(d.name)}</strong><small>${esc(deviceModel(d))}</small></span></button></td><td class="mono">${esc(d.ip)}</td><td class="mono muted">${esc(d.mac||'Not observed')}</td><td>${badge(d)}</td><td><span class="protocol-tag ${d.status==='online'?'supported':''}">${esc(protocolLabel(d.protocol))}</span></td><td class="muted">${timeAgo(d.last_seen)}</td><td><button class="icon-button" data-device="${esc(d.ip)}" aria-label="View ${esc(d.name)}">${icon('chevron')}</button></td></tr>`).join('')}</tbody></table></div></section><div class="notice lower-notice">${icon('shield')}Discovery uses ping, the local ARP cache, and read-only Shelly requests. A cached address alone is never marked online.</div>`;
+ return `${heading('Network', 'Discover devices and check how they connect to the collector.',true,'LOCAL NETWORK')}${connectionBanner()}${scanBanner()}<section class="network-info-grid">${statCard('Local subnet',esc(net.subnet||'Unknown'),'Discovery limited to this /24 network','network')}${statCard('Gateway',esc(net.gateway||'Unknown'),'Default route for this network','wifi')}${statCard('Collector IP',esc(net.local_ip||'Unknown'),`${esc(net.interface||'Local network address')}`,'server')}</section>${routerMonitoring()}<section class="panel"><div class="panel-heading"><div><h2>Network inventory</h2><p>${state.devices.length} devices saved · Last scan ${timeAgo(state.collector.last_scan)} · Names ${timeAgo(state.collector.last_name_discovery)}</p></div><div class="network-actions"><button class="text-button names-button" ${state.collector.naming?'disabled':''}>${icon('search')}${state.collector.naming?'Finding names…':'Refresh names'}</button><button class="text-button scan-button" ${state.collector.scanning?'disabled':''}>${icon('scan')}Scan again</button></div></div><div class="table-scroll"><table><thead><tr><th>Device</th><th>IP address</th><th>Hardware address</th><th>Connection</th><th>Telemetry API</th><th>Last seen</th><th></th></tr></thead><tbody>${state.devices.map(d=>`<tr><td><button class="table-device" data-device="${esc(d.ip)}">${icon(deviceIcon(d))}<span><strong>${esc(d.name)}</strong><small>${esc(deviceModel(d))}</small></span></button></td><td class="mono">${esc(d.ip)}</td><td class="mono muted">${esc(d.mac||'Not observed')}</td><td>${badge(d)}</td><td><span class="protocol-tag ${d.status==='online'?'supported':''}">${esc(protocolLabel(d.protocol))}</span></td><td class="muted">${timeAgo(d.last_seen)}</td><td><button class="icon-button" data-device="${esc(d.ip)}" aria-label="View ${esc(d.name)}">${icon('chevron')}</button></td></tr>`).join('')}</tbody></table></div></section><div class="notice lower-notice">${icon('shield')}Discovery uses ping, the local ARP cache, and read-only Shelly requests. A cached address alone is never marked online.</div>`;
 }
 function settingsPage() {
  const c=state.collector;

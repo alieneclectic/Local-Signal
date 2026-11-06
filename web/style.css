@@ -66,6 +66,16 @@
 .collection-panel { margin-bottom: 25px; }
 .collection-panel .settings-list dd { overflow-wrap: anywhere; }
 .collection-note { padding: 16px 23px; font-size: 11px; line-height: 1.6; color: var(--muted); }
+.router-monitoring { margin-bottom: 24px; }
+.router-monitoring table { white-space: normal; }
+.router-monitoring tbody th { text-align: left; text-transform: none; letter-spacing: normal; overflow-wrap: anywhere; }
+.router-monitoring tbody th small { display: block; margin-top: 4px; }
+.router-monitoring td { white-space: nowrap; }
+.router-monitoring .collection-note + .collection-note { padding-top: 0; }
+.router-monitoring a { color: inherit; text-decoration: underline; }
+.router-options { list-style: none; margin: 0; }
+.router-options li + li { margin-top: 8px; }
+.router-options code { display: block; margin-top: 4px; overflow-wrap: anywhere; }
 .chart-controls { flex-wrap: wrap; }
 .select-wrap select { max-width: min(200px, 48vw); }
 @media (max-width: 530px) {
@@ -73,6 +83,7 @@
   .sidebar nav .nav-item { padding-inline: 4px; }
   .sidebar-bottom { width: auto; flex: 0 0 auto; }
   .collection-note { padding-inline: 17px; }
+  .router-monitoring :is(th, td) { padding-inline: 9px; }
 }
 @media (max-width: 360px) {
   .breadcrumb > span:nth-child(2), .breadcrumb > b { display: none; }

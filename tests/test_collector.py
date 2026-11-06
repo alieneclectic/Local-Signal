@@ -163,6 +163,23 @@ class APITests(unittest.TestCase):
         self.assertEqual(status,400)
         self.assertEqual(self.request('/api/scan','POST','{}',{'Content-Type':'application/json'})[0],400)
 
+    def test_router_readings_are_only_served_to_loopback(self):
+        monitor, = self.collector.router_monitors
+        result = {'id': 'google-wifi', 'status': 'ready',
+                  'devices': [{'name': 'Fixture speaker', 'upload_bps': 0, 'paused': True}]}
+        accept = self.httpd.get_request
+
+        def simulate_lan_client():
+            connection, (_, port) = accept()
+            return connection, ('10.23.0.4', port)
+
+        with patch.object(monitor, 'snapshot', return_value=result):
+            state = json.loads(self.request('/api/state')[2])
+            self.assertEqual(state['router_monitoring'], [result])
+            with patch.object(self.httpd, 'get_request', side_effect=simulate_lan_client):
+                state = json.loads(self.request('/api/state')[2])
+            self.assertNotIn('router_monitoring', state)
+
     def test_public_targets_and_invalid_ranges_are_rejected(self):
         headers={'Content-Type':'application/json','X-Hearth-Request':'1'}
         for ip in ['8.8.8.8','127.0.0.1','169.254.169.254','example.com','10.23.1.255']:
