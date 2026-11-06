@@ -20,9 +20,7 @@ def xml(values, tag='response'):
 
 class RokuTests(unittest.TestCase):
     def test_partial_access_keeps_real_power_app_and_uptime(self):
-        info=xml({'model-name':'Roku Ultra','power-mode':'Suspend','uptime':1234,'software-version':'16.0.4',
-                  'network-type':'wifi','wifi-mac':'AA:BB:CC:DD:EE:FF','headphones-connected':'false',
-                  'advertising-id':'do-not-store','friendly-device-name':'Living room Roku'}, 'device-info')
+        info=ET.parse(Path(__file__).parent / 'fixtures' / 'roku' / 'ultra-device-info.xml').getroot()
         active=xml({'app':'Roku Dynamic Menu'}, 'active-app')
         blocked=HTTPError('local',403,'restricted',{},None)
         self.addCleanup(blocked.close)
@@ -37,6 +35,9 @@ class RokuTests(unittest.TestCase):
         self.assertIn('restricts',result['telemetry_note'])
         self.assertEqual(result['reported_name'],'Living room Roku')
         self.assertTrue(all('/query/' in call.args[1] for call in query.call_args_list))
+        check = result['firmware_check']
+        self.assertEqual(check['installed_version'], '16.0.4 (build 853)')
+        self.assertEqual((check['status'], check['available_version']), ('unknown', None))
 
 
 class UPnPTests(unittest.TestCase):

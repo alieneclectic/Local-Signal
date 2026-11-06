@@ -25,6 +25,8 @@ import network_names
 import media_readers
 import energy
 import reliability
+from firmware import checks as firmware_checks
+from firmware.adapters import nest, roku, shelly, sonos, wiim
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse, parse_qs
@@ -35,15 +37,16 @@ POLL_SECONDS = 30
 RETENTION_DAYS = 30
 ROOM_NAMES = {'first-floor': 'First floor', 'second-floor': 'Second floor'}
 MAX_BODY = 16_384
+FIRMWARE_CATALOGS = {'shelly': shelly, 'wiim': wiim, 'sonos': sonos, 'nest': nest}
+FIRMWARE_ADAPTERS = {**FIRMWARE_CATALOGS, 'roku': roku}
+FIRMWARE_CATALOG_KEYS = {source: f'{source}_stable_catalog' for source in FIRMWARE_CATALOGS}
+FIRMWARE_CATALOG_KEYS['nest'] = 'nest_production_catalog'  # Refresh the old Mini-only cache on upgrade.
 SEEDS = [
     ('10.23.1.45', 'Example meter A', 'Example energy meter.'),
     ('10.23.1.56', 'Example meter B', 'Example energy meter.'),
     ('10.23.1.44', 'Unidentified .44', 'Unidentified network device. No supported telemetry API found.'),
     ('10.23.1.54', 'Unidentified .54', 'Unidentified network device. No supported telemetry API found.'),
 ]
-MODELS = {'SHSW-PM': 'Shelly 1PM', 'SHSW-1': 'Shelly 1', 'SHHT-1': 'Shelly H&T',
-          'SHPLG-S': 'Shelly Plug S', 'SHPLG-U1': 'Shelly Plug US', 'SHSW-25': 'Shelly 2.5',
-          'SHDW-2': 'Shelly Door/Window 2', 'SHWT-1': 'Shelly Flood'}
 RFC1918 = [ipaddress.ip_network(x) for x in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')]
 
 
@@ -57,7 +60,7 @@ def local_ip(value):
     except ValueError:
         raise ValueError('Enter a private IPv4 address, such as 10.23.1.45.')
     if address.version != 4 or not any(address in net for net in RFC1918):
-        raise ValueError('Only private home-network IPv4 addresses are supported.')
+        raise ValueError('Only private IPv4 addresses are supported.')
     if address.packed[-1] in (0, 255):
         raise ValueError('Use a device address, not a network or broadcast address.')
     return str(address)
@@ -263,10 +266,11 @@ def probe_device(device):
             raise ValueError('HTTP responds, but a Shelly API was not identified.')
         gen = int(info.get('gen') or 1)
         result.update(protocol='shelly-gen1' if gen == 1 else 'shelly-rpc',
-                      model=MODELS.get(info.get('type'), info.get('model') or info.get('app') or info.get('type')),
+                      model=shelly.MODELS.get(info.get('type'), info.get('model') or info.get('app') or info.get('type')),
                       mac=info.get('mac'), firmware=info.get('ver') or info.get('fw'),
                       kind='sensor' if (info.get('type') == 'SHHT-1' or 'ht' in str(info.get('app', '')).lower()) else 'switch',
                       info=info)
+        status = None
         try:
             status = read_json(ip, '/status' if gen == 1 else '/rpc/Shelly.GetStatus')
         except HTTPError as exc:
@@ -274,6 +278,8 @@ def probe_device(device):
                 result.update(status='auth_required', error='Device authentication is enabled. Credentials are not configured.')
                 return result
             raise
+        finally:
+            result['firmware_check'] = shelly.observe(result['protocol'], info, status, result['checked_at'])
         result['metrics'].update(normalize(info, status))
         result.update(status='online', raw_status=status, raw_status_at=now(), last_telemetry=now(), telemetry_source='HTTP')
     except HTTPError as exc:
@@ -300,6 +306,8 @@ class Store:
             value REAL NOT NULL, unit TEXT NOT NULL, label TEXT NOT NULL);
           CREATE INDEX IF NOT EXISTS samples_lookup ON samples(at, ip, metric);
           CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, at TEXT NOT NULL, ip TEXT, type TEXT NOT NULL, message TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS firmware_alerts (device_id TEXT NOT NULL, channel TEXT NOT NULL,
+            version TEXT NOT NULL, PRIMARY KEY(device_id, channel, version));
           CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS text_samples (id INTEGER PRIMARY KEY, ip TEXT NOT NULL, at TEXT NOT NULL,
             metric TEXT NOT NULL,value TEXT NOT NULL,unit TEXT NOT NULL,label TEXT NOT NULL);
@@ -396,7 +404,7 @@ class Store:
             return devices
 
     def record(self, ip, result):
-        with self.lock:
+        with self.lock, self.db:
             row = self.db.execute('SELECT * FROM devices WHERE ip=?', (ip,)).fetchone()
             if not row:
                 return
@@ -447,7 +455,13 @@ class Store:
                 uptime = result.get('metrics', {}).get('uptime_s', {}).get('value')
                 self.db.execute('INSERT OR IGNORE INTO energy_readings VALUES(?,?,?,?)',
                                 (mac, result['checked_at'], counter, uptime if number(uptime) else None))
-            self.db.commit()
+            check = result.get('firmware_check')
+            if check and check['status'] == 'available':
+                version = check['available_version']
+                inserted = self.db.execute('INSERT OR IGNORE INTO firmware_alerts VALUES (?,?,?)',
+                                           (check['device_id'], check['channel'], version))
+                if inserted.rowcount:
+                    self.event(ip, 'firmware_update_available', f'Firmware {version} is available for {row["name"]}.')
         if result.get('reported_name'):
             self.apply_names([{'ip':ip, 'name':result['reported_name'], 'source':'Device API'}])
 
@@ -556,8 +570,10 @@ class Store:
                     params[-1] = max(POLL_SECONDS, int(seconds / 300))
             return [dict(r) for r in self.db.execute(sql, params)]
 
-    def events(self, limit=50):
+    def events(self, limit=50, kind=None):
         with self.lock:
+            if kind is not None:
+                return [dict(r) for r in self.db.execute('SELECT * FROM events WHERE type=? ORDER BY id DESC LIMIT ?', (kind, limit))]
             return [dict(r) for r in self.db.execute('SELECT * FROM events ORDER BY id DESC LIMIT ?', (limit,))]
 
     def link_room(self, room_id, ip, metric='temperature_c'):
@@ -647,6 +663,7 @@ class Store:
 
 class Collector:
     def __init__(self, store):
+        self.firmware_catalog_locks = {source: threading.Lock() for source in FIRMWARE_CATALOGS}
         self.store = store
         self.network = network_info()
         self.stop = threading.Event()
@@ -804,7 +821,7 @@ class Collector:
             network = network_info()
             self.network = network
             if not network.get('subnet'):
-                raise ValueError('Cannot detect your home subnet. Add devices by their private IP address instead.')
+                raise ValueError('Cannot detect the local subnet. Add devices by their private IP address instead.')
             subnet = ipaddress.ip_network(network['subnet'])
             targets = [str(ip) for ip in subnet.hosts() if str(ip) != network.get('local_ip')]
             self.state['scan_total'] = len(targets)
@@ -821,7 +838,7 @@ class Collector:
             for ip in sorted(targets, key=ipaddress.ip_address):
                 if ip == network.get('local_ip'):
                     continue
-                name = 'Home gateway' if ip == network.get('gateway') else None
+                name = 'Network gateway' if ip == network.get('gateway') else None
                 self.store.add_device(ip, name, notes='Discovered on your local network')
                 if entries.get(ip) or ip == network.get('gateway'):
                     with self.store.lock:
@@ -894,7 +911,40 @@ class Handler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
         if parsed.path == '/api/state':
-            return self.send_json({'devices': self.store.devices(), 'rooms': self.store.rooms(), 'collector': self.collector.snapshot(), 'events': self.store.events()})
+            with self.store.lock:
+                devices = self.store.devices()
+                events = self.store.events()
+                firmware_events = self.store.events(kind='firmware_update_available')
+                catalogs = {source: self.store.setting(key, {}) for source, key in FIRMWARE_CATALOG_KEYS.items()}
+            at = datetime.now(timezone.utc)
+            catalogs = {source: catalog for source, catalog in catalogs.items() if firmware_checks.catalog_is_fresh(catalog, at)}
+            candidates, catalog_models = [], {}
+            for device in devices:
+                for source, adapter in FIRMWARE_ADAPTERS.items():
+                    identity = adapter.identify(device)
+                    if identity is None:
+                        continue
+                    candidates.append((device, identity))
+                    model = adapter.catalog_model(device) if source in FIRMWARE_CATALOGS and identity['device_id'] else None
+                    catalog_models[device['ip']] = (source, model)
+                    break
+            firmware = firmware_checks.inventory(candidates, at)
+            for row in firmware:
+                source, model = catalog_models[row['ip']]
+                catalog = catalogs.get(source, {}) if model else {}
+                latest = catalog.get('versions', {}).get(model)
+                row['adapter_id'] = source
+                row['catalog_id'] = source if model else None
+                row['catalog_checked_at'] = catalog.get('checked_at')
+                row['latest_stable'] = latest
+                if row['status'] == 'available':
+                    row['stable_status'] = 'update_needed'
+                elif latest and row['channel'] == 'stable':
+                    row['stable_status'] = FIRMWARE_CATALOGS[source].compare_stable(row['installed_version'], latest)
+                else:
+                    row['stable_status'] = 'unverified'
+            return self.send_json({'devices': devices, 'rooms': self.store.rooms(), 'collector': self.collector.snapshot(),
+                                   'events': events, 'firmware': firmware, 'firmware_events': firmware_events})
         if parsed.path in ('/api/energy', '/api/energy.csv'):
             try:
                 days = int(query.get('days', ['7'])[0])
@@ -945,7 +995,7 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if parsed.path.startswith('/api/'):
             return self.send_json({'error': 'Endpoint not found.'}, 404)
-        if parsed.path not in ('/', '/index.html', '/app.js', '/style.css', '/heating.css', '/favicon.svg'):
+        if parsed.path not in ('/', '/index.html', '/app.js', '/style.css', '/favicon.svg'):
             return self.send_json({'error': 'File not found.'}, 404)
         super().do_GET()
 
@@ -976,6 +1026,27 @@ class Handler(SimpleHTTPRequestHandler):
             if self.path == '/api/refresh':
                 self.collector.start_poll()
                 return self.send_json({'ok': True}, 202)
+            if self.path == '/api/firmware/catalog/refresh':
+                source = data.get('source', 'shelly')
+                if not isinstance(source, str) or source not in FIRMWARE_CATALOGS:
+                    raise ValueError('Unknown firmware catalog.')
+                lock = self.collector.firmware_catalog_locks[source]
+                if not lock.acquire(blocking=False):
+                    return self.send_json({'ok': True, 'pending': True}, 202)
+                try:
+                    key = FIRMWARE_CATALOG_KEYS[source]
+                    catalog = self.store.setting(key, {})
+                    if firmware_checks.catalog_is_fresh(catalog, datetime.now(timezone.utc)):
+                        return self.send_json({'ok': True})
+                    versions = FIRMWARE_CATALOGS[source].fetch_stable_versions(build_opener(ProxyHandler({}), NoRedirects()))
+                    self.store.save_setting(key, {'checked_at': now(), 'versions': versions})
+                    return self.send_json({'ok': True})
+                except (OSError, ValueError) as exc:
+                    if isinstance(exc, HTTPError):
+                        exc.close()
+                    return self.send_json({'error': 'Could not read the firmware catalog.'}, 502)
+                finally:
+                    lock.release()
             if self.path == '/api/scan':
                 started = self.collector.start_scan()
                 return self.send_json({'ok': True, 'started': started}, 202)
@@ -1034,8 +1105,8 @@ class LocalHTTPServer(ThreadingHTTPServer):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Hearth local home telemetry dashboard')
-    parser.add_argument('--host', default='127.0.0.1', choices=['127.0.0.1', '0.0.0.0'], help='Use 0.0.0.0 to allow trusted home-network access.')
+    parser = argparse.ArgumentParser(description='Hearth local device monitoring dashboard')
+    parser.add_argument('--host', default='127.0.0.1', choices=['127.0.0.1', '0.0.0.0'], help='Use 0.0.0.0 to allow access from the trusted local network.')
     parser.add_argument('--port', type=int, default=8799)
     parser.add_argument('--data', default=str(ROOT / '.data' / 'hearth.sqlite3'))
     parser.add_argument('--no-collector', action='store_true', help=argparse.SUPPRESS)
@@ -1057,7 +1128,7 @@ def main():
             threading.Thread(target=collector.watchdog, daemon=True).start()
     print(f'Hearth is ready at http://localhost:{args.port}', flush=True)
     if args.host == '0.0.0.0' and collector.network.get('local_ip'):
-        print(f'Home-network access: http://{collector.network["local_ip"]}:{args.port}', flush=True)
+        print(f'Local network access: http://{collector.network["local_ip"]}:{args.port}', flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

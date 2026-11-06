@@ -1,0 +1,4 @@
+{
+  "info": {"gen": 2, "model": "SNSW-001P16EU", "mac": "020000000003", "ver": "1.4.0"},
+  "status": {"sys": {"available_updates": {"stable": {"version": "1.5.0"}, "beta": {"version": "1.6.0-beta1"}}}}
+}

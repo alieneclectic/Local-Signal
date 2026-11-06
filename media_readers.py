@@ -6,13 +6,15 @@ import html
 import json
 import math
 import re
+import ssl
 import threading
 import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse
-from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
 import xml.etree.ElementTree as ET
 
+from firmware.adapters import nest, roku as roku_firmware, sonos as sonos_firmware, wiim
 from network_names import private_ip
 
 MAX_RESPONSE = 262_144
@@ -67,6 +69,15 @@ def safe_url(ip, url):
 class NoRedirects(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
+
+
+def local_status_opener():
+    # WiiM and Nest status endpoints use device certificates outside the system trust store.
+    # The adapters restrict requests to fixed paths on private IPs and validate the reported identity.
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return build_opener(ProxyHandler({}), NoRedirects(), HTTPSHandler(context=context))
 
 
 def read_xml(ip, url, action=None, service=None, args=None):
@@ -157,14 +168,16 @@ def roku(ip):
     mac = values.get('wifi-mac') if connection == 'wifi' else values.get('ethernet-mac')
     result = finished('roku-ecp', model, metrics, notes, mac, values.get('software-version'))
     result['reported_name'] = text(values.get('user-device-name') or values.get('friendly-device-name'))
+    result['firmware_check'] = roku_firmware.observe(values, result['last_telemetry'])
+    result['firmware_peer_mac'] = mac
     return result
 
 
-def descriptor(ip, url):
+def descriptor(ip, url, fresh=False):
     key = (ip, url)
     with _CACHE_LOCK:
         cached = _DESCRIPTOR_CACHE.get(key)
-        if cached and time.monotonic() - cached[0] < 900:
+        if not fresh and cached and time.monotonic() - cached[0] < 900:
             return cached[1]
     root = read_xml(ip, url)
     device = root.find('./{*}device')
@@ -181,15 +194,17 @@ def descriptor(ip, url):
                 continue
             services[name] = (urn, control)
     result = {'model':device.findtext('{*}modelName') or 'Media renderer',
+              'model_number':device.findtext('{*}modelNumber'),
               'services':services, 'udn':device.findtext('{*}UDN'),
-              'firmware':device.findtext('.//{*}softwareVersion'), 'name':device.findtext('{*}friendlyName')}
+              'firmware':device.findtext('.//{*}softwareVersion'), 'name':device.findtext('{*}friendlyName'),
+              'checked_at':stamp()}
     with _CACHE_LOCK:
         _DESCRIPTOR_CACHE[key] = (time.monotonic(), result)
     return result
 
 
 def upnp(ip, description_url, sonos=False):
-    info = descriptor(ip, description_url)
+    info = descriptor(ip, description_url, fresh=sonos)
     metrics, notes = {}, []
     def query(service, action, args=None):
         if service not in info['services']:
@@ -246,6 +261,20 @@ def upnp(ip, description_url, sonos=False):
     result = finished('sonos-upnp' if sonos else 'upnp-av', info['model'], metrics, notes,
                       match[1] if match else None, info.get('firmware'))
     result['reported_name'] = metrics.get('speaker_room', {}).get('value') if sonos else info.get('name')
+    if sonos:
+        result['firmware_check'] = sonos_firmware.observe(result.get('mac'), info.get('firmware'), info.get('checked_at'))
+        result['firmware_model'] = info.get('model_number')
+        result['firmware_peer_mac'] = result.get('mac')
+    elif wiim.matches(result):
+        try:
+            check, peer_mac = wiim.read(ip, info.get('udn'), stamp(), local_status_opener())
+            result.update(firmware_check=check, firmware_peer_mac=peer_mac, firmware=check['installed_version'])
+            if peer_mac:
+                result['mac'] = peer_mac
+        except (OSError, ValueError) as exc:
+            if isinstance(exc, HTTPError):
+                exc.close()
+            result['firmware_check'] = None
     return result
 
 
@@ -287,8 +316,21 @@ def cast(ip, device):
                 add_text(metrics, 'media_album', getattr(media, 'album_name', None), 'Album')
                 add_metric(metrics, 'media_position_s', media.current_time, 'Track position', 's', minimum=0)
                 add_metric(metrics, 'media_duration_s', media.duration, 'Track duration', 's', minimum=0)
-        return finished('google-cast', device.get('advertised_model') or 'Google Cast receiver', metrics,
-                        ['Cast status describes the receiver; an idle Cast receiver does not prove the entire device is powered off.'])
+        result = finished('google-cast', device.get('advertised_model') or 'Google Cast receiver', metrics,
+                          ['Cast status describes the receiver; an idle Cast receiver does not prove the entire device is powered off.'])
+        if nest.matches(result):
+            model = result['model']
+            checked_at = stamp()
+            try:
+                check = nest.read(ip, model, checked_at, local_status_opener())
+            except (OSError, ValueError) as exc:
+                if isinstance(exc, HTTPError):
+                    exc.close()
+                check = nest.unknown(model, checked_at)
+            result.update(firmware_check=check, firmware_peer_mac=check['device_id'], firmware=check['installed_version'])
+            if check['device_id']:
+                result['mac'] = check['device_id']
+        return result
     finally:
         if client:
             try:

@@ -127,6 +127,7 @@ class APITests(unittest.TestCase):
     def test_assets_state_history_and_csv(self):
         self.assertEqual(self.request()[0],200)
         state=json.loads(self.request('/api/state')[2]);self.assertEqual(len(state['devices']),4)
+        self.assertEqual((state['firmware'], state['firmware_events']), ([], []))
         self.assertEqual(self.request('/api/history?hours=24')[0],200)
         status,headers,body=self.request('/api/export.csv?hours=24')
         self.assertEqual(status,200);self.assertIn('text/csv',headers['Content-Type']);self.assertIn(b'ip,at,metric,value,unit,label',body)

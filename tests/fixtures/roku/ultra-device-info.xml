@@ -1,0 +1,15 @@
+<device-info>
+  <udn>12345678-1234-1234-1234-123456789abc</udn>
+  <vendor-name>Roku</vendor-name>
+  <model-number>4800X</model-number>
+  <model-name>Roku Ultra</model-name>
+  <software-version>16.0.4</software-version>
+  <software-build>853</software-build>
+  <network-type>wifi</network-type>
+  <wifi-mac>02:00:00:00:00:01</wifi-mac>
+  <power-mode>Suspend</power-mode>
+  <uptime>1234</uptime>
+  <headphones-connected>false</headphones-connected>
+  <advertising-id>do-not-store</advertising-id>
+  <friendly-device-name>Living room Roku</friendly-device-name>
+</device-info>

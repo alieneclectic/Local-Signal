@@ -21,6 +21,9 @@ SUPPORT = Path.home() / 'Library' / 'Application Support' / 'Hearth'
 PLIST = Path.home() / 'Library' / 'LaunchAgents' / f'{LABEL}.plist'
 DOMAIN = f'gui/{os.getuid()}'
 FILES = ['server.py', 'coiot.py', 'network_names.py', 'media_readers.py', 'energy.py', 'reliability.py', 'background.py', 'requirements.txt', 'macos/Collector.swift']
+FILES += ['firmware/__init__.py', 'firmware/checks.py', 'firmware/adapters/__init__.py',
+          'firmware/adapters/shelly.py', 'firmware/adapters/wiim.py', 'firmware/adapters/sonos.py',
+          'firmware/adapters/roku.py', 'firmware/adapters/nest.py', 'firmware/catalog/shelly.json']
 SYSTEM_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
 
 
@@ -44,7 +47,7 @@ def build_app(stage):
     info = {'CFBundleIdentifier': LABEL, 'CFBundleName': 'Hearth', 'CFBundleDisplayName': 'Hearth',
             'CFBundleExecutable': 'Hearth', 'CFBundlePackageType': 'APPL',
             'CFBundleVersion': '1', 'CFBundleShortVersionString': '1.0', 'LSUIElement': True,
-            'NSLocalNetworkUsageDescription': 'Hearth reads your home energy meters, room sensors, and media status. Readings stay on this Mac.',
+        'NSLocalNetworkUsageDescription': 'Hearth reads device status and measurements on the local network. Readings stay on this Mac.',
             'NSBonjourServices': ['_googlecast._tcp', '_http._tcp', '_sonos._tcp', '_roku-ecp._tcp']}
     (app / 'Contents/Info.plist').write_bytes(plistlib.dumps(info))
     subprocess.run(['/usr/bin/xcrun', 'swiftc', '-O', str(stage / 'macos/Collector.swift'), '-o', str(executable)], check=True)
