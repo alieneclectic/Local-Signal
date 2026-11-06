@@ -1,0 +1,38 @@
+[project]
+name = "local-signal"
+version = "0.1.0"
+license = "MIT"
+license-files = ["LICENSE"]
+
+[tool.briefcase]
+bundle = "local.signal"
+url = "https://github.com/alieneclectic/Local-Signal"
+author = "alieneclectic"
+
+[tool.briefcase.app.collector]
+formal_name = "Local Signal"
+description = "Discover and monitor devices on your local network."
+sources = [
+    "packaging/collector",
+    "server.py",
+    "coiot.py",
+    "energy.py",
+    "firmware",
+    "media_readers.py",
+    "network_names.py",
+    "reliability.py",
+    "web",
+]
+# Keep these in sync with requirements.txt for source installations.
+requires = ["PyChromecast==14.0.10", "tzdata==2026.6; sys_platform == 'win32'"]
+
+[tool.briefcase.app.collector.macOS]
+sources = ["background.py"]
+universal_build = false
+info.LSUIElement = true
+info.NSLocalNetworkUsageDescription = "Local Signal reads your device status and telemetry. Readings stay on this computer."
+
+[tool.briefcase.app.collector.windows]
+system_installer = false
+post_install_script = "packaging/windows-install.bat"
+pre_uninstall_script = "packaging/windows-uninstall.bat"

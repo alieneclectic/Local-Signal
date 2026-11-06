@@ -29,6 +29,8 @@ python3 -m venv .venv
 
 On macOS, [install-background.command](install-background.command) can set up collection at login. It requires Xcode's Swift compiler and an Apple code signing identity. The running collector keeps up to seven daily database snapshots locally; check **Settings** for collection and backup status.
 
+For Windows collector setup and the Briefcase installer previews, see the [packaging guide](packaging/README.md).
+
 ## Device support
 
 | Devices | What Local Signal can read |
@@ -55,3 +57,7 @@ Start with the [contributor guide](CONTRIBUTING.md) for a local preview, tests, 
 ## Data and implementation
 
 [server.py](server.py) serves the API and dashboard, collects readings, and writes to SQLite. The frontend lives in [web/](web/) and uses plain HTML, CSS, and JavaScript. [media_readers.py](media_readers.py) handles local media status, [firmware/](firmware/) contains firmware adapters, and [tests/](tests/) covers collection, storage, and device behavior.
+
+## License
+
+Local Signal is available under the [MIT License](LICENSE).
