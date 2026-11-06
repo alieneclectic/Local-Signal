@@ -1,6 +1,6 @@
-# Hearth contributor instructions for coding agents
+# Local Signal contributor instructions for coding agents
 
-Hearth is a local home telemetry dashboard. Python serves the API and static frontend, polls supported devices, and stores observations in SQLite. Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup and submission steps and [README.md](README.md) for product behavior.
+Local Signal is a dashboard for devices on local networks. Python serves the API and static frontend, polls supported devices, and stores observations in SQLite. Read [CONTRIBUTING.md](CONTRIBUTING.md) for setup and submission steps and [README.md](README.md) for product behavior.
 
 ## Workflow
 
@@ -17,7 +17,7 @@ Hearth is a local home telemetry dashboard. Python serves the API and static fro
 | Device names or media status | [`network_names.py`](network_names.py), [`media_readers.py`](media_readers.py) | [`tests/test_network_names.py`](tests/test_network_names.py), [`tests/test_media_readers.py`](tests/test_media_readers.py) |
 | Firmware evidence and update alerts | [`firmware/`](firmware/), `Store.record`, `/api/state` | [`tests/test_firmware.py`](tests/test_firmware.py), [`tests/fixtures/shelly/`](tests/fixtures/shelly/) |
 | Heating energy, coverage, or cost | [`energy.py`](energy.py), `Store.energy_summary`, `/api/energy` | [`tests/test_energy.py`](tests/test_energy.py) |
-| Dashboard UI | [`web/index.html`](web/index.html), [`web/app.js`](web/app.js), [`web/style.css`](web/style.css), [`web/heating.css`](web/heating.css) | API tests in [`tests/test_collector.py`](tests/test_collector.py) and a loopback browser preview |
+| Dashboard UI | [`web/index.html`](web/index.html), [`web/app.js`](web/app.js), [`web/style.css`](web/style.css) | API tests in [`tests/test_collector.py`](tests/test_collector.py) and a loopback browser preview |
 | Backups or macOS background collection | [`reliability.py`](reliability.py), [`background.py`](background.py), [`macos/Collector.swift`](macos/Collector.swift) | [`tests/test_reliability.py`](tests/test_reliability.py) |
 
 ## Behavior to preserve

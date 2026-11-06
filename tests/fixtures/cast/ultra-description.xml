@@ -1,0 +1,8 @@
+<root xmlns="urn:schemas-upnp-org:device-1-0">
+  <device>
+    <deviceType>urn:dial-multiscreen-org:device:dial:1</deviceType>
+    <manufacturer>Google Inc.</manufacturer>
+    <modelName>Chromecast Ultra</modelName>
+    <UDN>uuid:260e9e33-49d5-a3f6-4f79-000000000001</UDN>
+  </device>
+</root>

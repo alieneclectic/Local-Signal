@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hearth: a dependency-free, read-only LAN inventory and telemetry collector."""
+"""Local Signal is a dependency-free, read-only LAN inventory and telemetry collector."""
 from __future__ import annotations
 
 import argparse
@@ -26,7 +26,7 @@ import media_readers
 import energy
 import reliability
 from firmware import checks as firmware_checks
-from firmware.adapters import nest, roku, shelly, sonos, wiim
+from firmware.adapters import cast, nest, roku, shelly, sonos, wiim
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse, parse_qs
@@ -37,7 +37,7 @@ POLL_SECONDS = 30
 RETENTION_DAYS = 30
 ROOM_NAMES = {'first-floor': 'First floor', 'second-floor': 'Second floor'}
 MAX_BODY = 16_384
-FIRMWARE_CATALOGS = {'shelly': shelly, 'wiim': wiim, 'sonos': sonos, 'nest': nest}
+FIRMWARE_CATALOGS = {'shelly': shelly, 'wiim': wiim, 'sonos': sonos, 'nest': nest, 'cast': cast}
 FIRMWARE_ADAPTERS = {**FIRMWARE_CATALOGS, 'roku': roku}
 FIRMWARE_CATALOG_KEYS = {source: f'{source}_stable_catalog' for source in FIRMWARE_CATALOGS}
 FIRMWARE_CATALOG_KEYS['nest'] = 'nest_production_catalog'  # Refresh the old Mini-only cache on upgrade.
@@ -255,6 +255,13 @@ def probe_device(device):
         except Exception as exc:
             result.update(status='reachable' if alive else 'unreachable', kind='media', protocol=reader,
                           error=f'Local media telemetry unavailable: {str(exc)[:160]}')
+        expected = cast.family({**device, **result})
+        if expected:
+            result.update(media_readers.read_cast_firmware(ip, expected))
+            if result['firmware_peer_mac']:
+                result.update(reachable=True, mac=result['firmware_peer_mac'])
+                if result['status'] == 'unreachable':
+                    result['status'] = 'reachable'
         return result
     if not port_open(ip):
         result.update(status='reachable' if alive else 'unreachable', error='No local HTTP API on port 80.' if alive else 'No response. The device may be asleep, disconnected, or filtering probes.')
@@ -939,7 +946,7 @@ class Handler(SimpleHTTPRequestHandler):
                 row['latest_stable'] = latest
                 if row['status'] == 'available':
                     row['stable_status'] = 'update_needed'
-                elif latest and row['channel'] == 'stable':
+                elif latest and row['channel'] == 'stable' and row['status'] != 'stale':
                     row['stable_status'] = FIRMWARE_CATALOGS[source].compare_stable(row['installed_version'], latest)
                 else:
                     row['stable_status'] = 'unverified'
@@ -963,7 +970,7 @@ class Handler(SimpleHTTPRequestHandler):
             body = output.getvalue().encode('utf-8-sig')
             self.send_response(200)
             self.send_header('Content-Type', 'text/csv; charset=utf-8')
-            self.send_header('Content-Disposition', 'attachment; filename="hearth-heating.csv"')
+            self.send_header('Content-Disposition', 'attachment; filename="local-signal-heating.csv"')
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -988,7 +995,7 @@ class Handler(SimpleHTTPRequestHandler):
             body = output.getvalue().encode('utf-8-sig')
             self.send_response(200)
             self.send_header('Content-Type', 'text/csv; charset=utf-8')
-            self.send_header('Content-Disposition', 'attachment; filename="hearth-telemetry.csv"')
+            self.send_header('Content-Disposition', 'attachment; filename="local-signal-telemetry.csv"')
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -1105,7 +1112,7 @@ class LocalHTTPServer(ThreadingHTTPServer):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Hearth local device monitoring dashboard')
+    parser = argparse.ArgumentParser(description='Local Signal device monitoring dashboard')
     parser.add_argument('--host', default='127.0.0.1', choices=['127.0.0.1', '0.0.0.0'], help='Use 0.0.0.0 to allow access from the trusted local network.')
     parser.add_argument('--port', type=int, default=8799)
     parser.add_argument('--data', default=str(ROOT / '.data' / 'hearth.sqlite3'))
@@ -1126,7 +1133,7 @@ def main():
         threading.Thread(target=collector.run, daemon=True).start()
         if args.background:
             threading.Thread(target=collector.watchdog, daemon=True).start()
-    print(f'Hearth is ready at http://localhost:{args.port}', flush=True)
+    print(f'Local Signal is ready at http://localhost:{args.port}', flush=True)
     if args.host == '0.0.0.0' and collector.network.get('local_ip'):
         print(f'Local network access: http://{collector.network["local_ip"]}:{args.port}', flush=True)
     try:

@@ -1,4 +1,4 @@
-# Contributing to Hearth
+# Contributing to Local Signal
 
 You can contribute without smart-home hardware. The tests use mock device responses, temporary SQLite databases, and loopback HTTP servers. See [the project README](README.md#data-and-implementation) for an overview of the code.
 
@@ -14,8 +14,8 @@ python3 -m venv .venv
 To preview UI changes from the repo root, start a loopback-only server on a separate port with a disposable database.
 
 ```sh
-hearth_preview_dir=$(mktemp -d)
-python3 server.py --host 127.0.0.1 --port 8800 --data "$hearth_preview_dir/hearth.sqlite3" --no-collector
+local_signal_preview_dir=$(mktemp -d)
+python3 server.py --host 127.0.0.1 --port 8800 --data "$local_signal_preview_dir/preview.sqlite3" --no-collector
 ```
 
 Open [the local preview](http://127.0.0.1:8800/). The preview includes seeded inventory and starts without background polling or the sensor listener. Manual actions such as **Refresh**, **Scan network**, **Refresh names**, and **Add device** can still contact the network. Leave those controls alone for a UI-only preview. Press Control-C to stop the server.
@@ -32,7 +32,7 @@ Include what you expected, what happened, and steps to reproduce it. For an inte
 
 ## Add firmware support for a device model
 
-For a Shelly Gen 1 device that uses the existing endpoints, add its exact `/shelly` `type` and display name to [the Shelly catalog](firmware/catalog/shelly.json). The firmware reader already uses the standard Gen 1 status fields for any identified Shelly that returns them. Gen 2+ devices usually supply their own `model` in `/shelly`. Add a small fixture to [the Shelly examples](tests/fixtures/shelly/) if the model supplies a new response shape. Use the fixture to show how Hearth handles the response.
+For a Shelly Gen 1 device that uses the existing endpoints, add its exact `/shelly` `type` and display name to [the Shelly catalog](firmware/catalog/shelly.json). The firmware reader already uses the standard Gen 1 status fields for any identified Shelly that returns them. Gen 2+ devices usually supply their own `model` in `/shelly`. Add a small fixture to [the Shelly examples](tests/fixtures/shelly/) if the model supplies a new response shape. Use the fixture to show how Local Signal handles the response.
 
 ## Add a firmware interface
 
