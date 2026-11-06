@@ -41,12 +41,6 @@ FIRMWARE_CATALOGS = {'shelly': shelly, 'wiim': wiim, 'sonos': sonos, 'nest': nes
 FIRMWARE_ADAPTERS = {**FIRMWARE_CATALOGS, 'roku': roku}
 FIRMWARE_CATALOG_KEYS = {source: f'{source}_stable_catalog' for source in FIRMWARE_CATALOGS}
 FIRMWARE_CATALOG_KEYS['nest'] = 'nest_production_catalog'  # Refresh the old Mini-only cache on upgrade.
-SEEDS = [
-    ('10.23.1.45', 'Example meter A', 'Example energy meter.'),
-    ('10.23.1.56', 'Example meter B', 'Example energy meter.'),
-    ('10.23.1.44', 'Unidentified .44', 'Unidentified network device. No supported telemetry API found.'),
-    ('10.23.1.54', 'Unidentified .54', 'Unidentified network device. No supported telemetry API found.'),
-]
 RFC1918 = [ipaddress.ip_network(x) for x in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')]
 
 
@@ -58,7 +52,7 @@ def local_ip(value):
     try:
         address = ipaddress.ip_address(value)
     except ValueError:
-        raise ValueError('Enter a private IPv4 address, such as 10.23.1.45.')
+        raise ValueError('Enter a private IPv4 address, such as 192.168.1.44.')
     if address.version != 4 or not any(address in net for net in RFC1918):
         raise ValueError('Only private IPv4 addresses are supported.')
     if address.packed[-1] in (0, 255):
@@ -328,8 +322,6 @@ class Store:
             for row in self.db.execute('SELECT ip,name FROM devices').fetchall():
                 if row['name'] in (f'Device .{row["ip"].split(".")[-1]}', f'Unidentified .{row["ip"].split(".")[-1]}'):
                     self.db.execute("UPDATE devices SET name_mode='auto' WHERE ip=?", (row['ip'],))
-        for ip, name, notes in SEEDS:
-            self.add_device(ip, name, notes=notes, pinned=True)
         if not self.setting('energy_migrated'):
             # Existing samples predate hardware-keyed energy history. Import their
             # identified meter identity once; new readings carry identity at capture.
@@ -341,11 +333,7 @@ class Store:
               AND LENGTH(REPLACE(json_extract(d.payload,'$.mac'),':',''))=12''')
             self.save_setting('energy_migrated', True)
         if not self.setting('heating'):
-            # Select recognized meters for the example inventory.
-            macs = [energy.identity(d.get('mac')) for d in self.devices()
-                    if d['ip'] in ('10.23.1.45', '10.23.1.56')
-                    and d.get('model') == 'Shelly 1PM' and d['name'].startswith('Example meter')]
-            self.save_setting('heating', {**energy.DEFAULT_SETTINGS, 'meter_macs': [m for m in macs if m]})
+            self.save_setting('heating', energy.DEFAULT_SETTINGS)
         self.db.commit()
 
     def setting(self, key, default=None):

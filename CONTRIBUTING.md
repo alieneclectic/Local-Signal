@@ -18,7 +18,7 @@ local_signal_preview_dir=$(mktemp -d)
 python3 server.py --host 127.0.0.1 --port 8800 --data "$local_signal_preview_dir/preview.sqlite3" --no-collector
 ```
 
-Open [the local preview](http://127.0.0.1:8800/). The preview includes seeded inventory and starts without background polling or the sensor listener. Manual actions such as **Refresh**, **Scan network**, **Refresh names**, and **Add device** can still contact the network. Leave those controls alone for a UI-only preview. Press Control-C to stop the server.
+Open [the local preview](http://127.0.0.1:8800/). The preview starts with an empty inventory and skips background polling and the sensor listener. Manual actions such as **Refresh**, **Scan network**, **Refresh names**, and **Add device** can still contact the network. Leave those controls alone for a UI-only preview. Press Control-C to stop the server.
 
 ## Working with an LLM
 

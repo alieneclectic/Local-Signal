@@ -109,9 +109,10 @@ class StoredNameTests(unittest.TestCase):
         self.assertEqual(self.device()['name'], 'Device .88')
 
     def test_no_name_keeps_placeholder_and_manual_heater_names(self):
-        heater = next(d for d in self.store.devices() if d['ip']=='10.23.1.45')
-        self.store.apply_names([{'ip':heater['ip'],'name':'shelly1pm-1234','source':'Local DNS'}])
-        self.assertEqual(next(d for d in self.store.devices() if d['ip']==heater['ip'])['name'], heater['name'])
+        heater_ip = '10.23.0.10'
+        self.store.add_device(heater_ip, 'Workshop heater')
+        self.store.apply_names([{'ip': heater_ip, 'name': 'shelly1pm-1234', 'source': 'Local DNS'}])
+        self.assertEqual(next(d for d in self.store.devices() if d['ip'] == heater_ip)['name'], 'Workshop heater')
         self.assertEqual(self.device()['name'], 'Device .88')
 
     def test_existing_database_migrates_generated_labels_only(self):

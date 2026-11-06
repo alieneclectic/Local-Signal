@@ -17,7 +17,7 @@ From the repository root, run the collector with Python 3.11 or newer:
 python3 server.py
 ```
 
-Open [http://127.0.0.1:8799](http://127.0.0.1:8799). Select **Scan network** to discover devices on the local subnet, or **Add device** if you know the address. Keep the computer awake and the server running to collect readings. You can close the browser while collection continues.
+Open [http://127.0.0.1:8799](http://127.0.0.1:8799). A fresh installation starts with an empty device list. Select **Scan network** to discover devices on the local subnet, or **Add device** if you know the address. Keep the computer awake and the server running to collect readings. You can close the browser while collection continues.
 
 For Google Cast telemetry, install the dependencies into a virtual environment and start the server with that environment's Python. On macOS and Linux:
 

@@ -12,7 +12,7 @@ import server
 
 MAC = 'AABBCCDDEEFF'
 DEVICE = {'mac': 'AA:BB:CC:DD:EE:FF', 'name': 'Heater', 'room': 'First floor',
-          'metrics': {'energy_kwh': {'value': 10}}, 'ip': '10.23.1.45'}
+          'metrics': {'energy_kwh': {'value': 10}}, 'ip': '10.23.0.10'}
 SETTINGS = {'rate_per_kwh': .25, 'timezone': 'America/New_York', 'meter_macs': [MAC]}
 
 
@@ -95,6 +95,7 @@ class EnergyStorageTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.store = server.Store(Path(self.tmp.name) / 'test.sqlite3')
+        self.store.add_device(DEVICE['ip'], DEVICE['name'], room=DEVICE['room'])
 
     def tearDown(self):
         self.store.db.close()
@@ -105,17 +106,18 @@ class EnergyStorageTests(unittest.TestCase):
                               'metrics': {'energy_kwh': {'value': counter, 'unit': 'kWh', 'label': 'Energy'}}})
 
     def test_hardware_identity_survives_ip_change_without_cross_device_usage(self):
-        self.record('10.23.1.45', '2026-10-27T15:00:00+00:00', 10)
-        self.store.add_device('10.23.1.99', 'Heater at new IP')
-        self.record('10.23.1.99', '2026-10-27T15:01:00+00:00', 10.1)
-        self.record('10.23.1.45', '2026-10-27T15:01:00+00:00', 999, '11:22:33:44:55:66')
+        new_ip = '10.23.0.11'
+        self.record(DEVICE['ip'], '2026-10-27T15:00:00+00:00', 10)
+        self.store.add_device(new_ip, 'Heater at new IP')
+        self.record(new_ip, '2026-10-27T15:01:00+00:00', 10.1)
+        self.record(DEVICE['ip'], '2026-10-27T15:01:00+00:00', 999, '11:22:33:44:55:66')
         rows = [dict(r) for r in self.store.db.execute('SELECT * FROM energy_readings ORDER BY source_id,at')]
         result = energy.summarize(rows, self.store.devices(), SETTINGS, 1, datetime.fromisoformat('2026-10-27T16:00:00+00:00'))
         self.assertEqual(result['total']['kwh'], .1)
-        self.assertEqual(result['sources'][0]['ip'], '10.23.1.99')
+        self.assertEqual(result['sources'][0]['ip'], new_ip)
 
     def test_settings_persist_and_changing_rate_clears_old_bill_note(self):
-        self.record('10.23.1.45', server.now(), 5)
+        self.record(DEVICE['ip'], server.now(), 5)
         self.store.heating_settings(SETTINGS)
         self.store.save_setting('heating_rate_note', 'Old bill rate')
         self.store.heating_settings({**SETTINGS, 'rate_per_kwh': .3})
@@ -125,7 +127,7 @@ class EnergyStorageTests(unittest.TestCase):
         self.assertEqual(self.store.heating_settings()['rate_per_kwh'], .3)
 
     def test_one_time_import_baselines_existing_samples_without_duplicate_history(self):
-        self.record('10.23.1.45', server.now(), 5)
+        self.record(DEVICE['ip'], server.now(), 5)
         self.store.db.execute('DELETE FROM energy_readings')
         self.store.db.execute("DELETE FROM settings WHERE key='energy_migrated'")
         self.store.db.commit()
@@ -139,7 +141,7 @@ class EnergyAPITests(unittest.TestCase):
     def test_energy_api_export_and_same_origin_settings(self):
         with tempfile.TemporaryDirectory() as folder:
             store = server.Store(Path(folder) / 'test.sqlite3')
-            with patch.object(server, 'network_info', return_value={'local_ip': '10.23.1.59'}):
+            with patch.object(server, 'network_info', return_value={'local_ip': '10.23.0.2'}):
                 collector = server.Collector(store)
             httpd = server.LocalHTTPServer(('127.0.0.1', 0), server.Handler)
             httpd.store, httpd.collector = store, collector

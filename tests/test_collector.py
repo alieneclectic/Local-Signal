@@ -49,7 +49,7 @@ class MetricsTests(unittest.TestCase):
         self.assertFalse(metrics)
 
     def test_probe_uses_only_read_only_endpoints(self):
-        device={'ip':'10.23.1.45'}
+        device={'ip':'10.23.0.10'}
         with patch.object(server,'ping',return_value=(True,12)), patch.object(server,'port_open',return_value=True), patch.object(server,'read_json',side_effect=[{'type':'SHSW-PM'},{'relays':[{'ison':True}],'meters':[{'power':400}]}]) as read:
             result=server.probe_device(device)
         self.assertEqual(result['status'],'online')
@@ -60,13 +60,15 @@ class StorageTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory()
         self.store=server.Store(Path(self.tmp.name)/'test.sqlite3')
+        self.ip = '10.23.0.10'
+        self.store.add_device(self.ip, 'Test relay')
 
     def tearDown(self):
         self.store.db.close()
         self.tmp.cleanup()
 
     def test_unreachable_preserves_last_telemetry_separately(self):
-        ip='10.23.1.45';at=server.now()
+        ip=self.ip;at=server.now()
         self.store.record(ip,{'status':'online','reachable':True,'checked_at':at,'last_telemetry':at,'metrics':{'power_w':{'value':50,'unit':'W','label':'Power'}}})
         self.store.record(ip,{'status':'unreachable','reachable':False,'checked_at':at,'metrics':{}})
         device=next(d for d in self.store.devices() if d['ip']==ip)
@@ -77,15 +79,19 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(len(self.store.history(ip=ip)),1)
 
     def test_labels_persist_and_cannot_mutate_device_hardware(self):
-        self.store.patch('10.23.1.45',{'name':'Office power','room':'Office','pinned':True})
-        self.store.record('10.23.1.45',{'status':'reachable','reachable':True,'checked_at':server.now(),'metrics':{}})
-        self.assertEqual(next(d for d in self.store.devices() if d['ip']=='10.23.1.45')['room'],'Office')
+        self.store.patch(self.ip, {'name':'Office power','room':'Office','pinned':True})
+        self.store.record(self.ip, {'status':'reachable','reachable':True,'checked_at':server.now(),'metrics':{}})
+        self.store.db.close()
+        self.store = server.Store(Path(self.tmp.name) / 'test.sqlite3')
+        [device] = self.store.devices()
+        self.assertEqual((device['ip'], device['name'], device['room']), (self.ip, 'Office power', 'Office'))
+        self.assertTrue(device['pinned'])
         with self.assertRaises(ValueError):
-            self.store.patch('10.23.1.45',{'relay':True})
-        self.assertFalse(self.store.add_device('10.23.1.45','Duplicate'))
+            self.store.patch(self.ip, {'relay':True})
+        self.assertFalse(self.store.add_device(self.ip, 'Duplicate'))
 
     def test_relay_transitions_create_observation_events(self):
-        ip='10.23.1.45';at=server.now()
+        ip=self.ip;at=server.now()
         for value in (0,1,1):
             self.store.record(ip,{'status':'online','reachable':True,'checked_at':at,'metrics':{'relay_0':{'value':value,'unit':'','label':'Channel 1 relay'}}})
         changes=[event for event in self.store.events() if event['type']=='relay_changed']
@@ -93,7 +99,7 @@ class StorageTests(unittest.TestCase):
         self.assertIn('is now on',changes[0]['message'])
 
     def test_chart_aggregation_does_not_replace_csv_samples(self):
-        ip='10.23.1.45';at=server.now()
+        ip=self.ip;at=server.now()
         for n in range(4):
             self.store.record(ip,{'status':'online','reachable':True,'checked_at':at,'metrics':{'power_w':{'value':n*10,'unit':'W','label':'Power'}}})
         self.assertEqual(len(self.store.history(ip=ip)),4)
@@ -107,7 +113,7 @@ class APITests(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp=tempfile.TemporaryDirectory()
         cls.store=server.Store(Path(cls.tmp.name)/'test.sqlite3')
-        with patch.object(server,'network_info',return_value={'local_ip':'10.23.1.59','subnet':'10.23.1.0/24'}):
+        with patch.object(server,'network_info',return_value={'local_ip':'10.23.0.2','subnet':'10.23.0.0/24'}):
             cls.collector=server.Collector(cls.store)
         cls.httpd=server.LocalHTTPServer(('127.0.0.1',0),server.Handler)
         cls.httpd.store=cls.store
@@ -126,7 +132,8 @@ class APITests(unittest.TestCase):
 
     def test_assets_state_history_and_csv(self):
         self.assertEqual(self.request()[0],200)
-        state=json.loads(self.request('/api/state')[2]);self.assertEqual(len(state['devices']),4)
+        state=json.loads(self.request('/api/state')[2])
+        self.assertEqual((state['devices'], state['events']), ([], []))
         self.assertEqual((state['firmware'], state['firmware_events']), ([], []))
         self.assertEqual(self.request('/api/history?hours=24')[0],200)
         status,headers,body=self.request('/api/export.csv?hours=24')

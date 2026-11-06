@@ -51,7 +51,7 @@ class RoomSensorTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.store = server.Store(Path(self.tmp.name) / 'sensors.sqlite3')
-        self.ip = '10.23.1.57'
+        self.ip = '10.23.0.12'
         self.at = (datetime.now(timezone.utc) - timedelta(minutes=45)).isoformat(timespec='seconds')
         self.store.add_device(self.ip, 'First floor sensor', room='First floor', expected_sleep=True)
         self.store.record(self.ip, {'status': 'online', 'reachable': True, 'checked_at': self.at, 'last_telemetry': self.at,
@@ -74,7 +74,8 @@ class RoomSensorTests(unittest.TestCase):
         self.assertEqual(room['sensor']['status'], 'unreachable')
 
     def test_room_link_rejects_heater_internal_temperature(self):
-        ip = '10.23.1.45'
+        ip = '10.23.0.10'
+        self.store.add_device(ip, 'Test heater')
         self.store.record(ip, {'status': 'online', 'reachable': True, 'checked_at': server.now(), 'mac': 'AABBCCDDEEFF',
             'metrics': {'internal_temperature_c': {'value': 55, 'unit': '°C', 'label': 'Internal temperature'}}})
         with self.assertRaises(ValueError):
