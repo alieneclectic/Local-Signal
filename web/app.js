@@ -11,6 +11,7 @@ const paths = {
  network:'<rect x="8" y="2" width="8" height="6" rx="1.5"/><rect x="2" y="16" width="8" height="6" rx="1.5"/><rect x="14" y="16" width="8" height="6" rx="1.5"/><path d="M12 8v4M6 16v-4h12v4"/>',
  settings:'<path d="m9 3-1 3-3 1-2 3 2 2-1 3 2 3 3-1 2 3h3l1-3 3-1 2-3-2-2 1-3-2-3-3 1-2-3z"/><circle cx="12" cy="12" r="3"/>',
  shield:'<path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6zM8 12l3 3 5-6"/>',
+ 'circle-question':'<circle cx="12" cy="12" r="9"/><path d="M9 9a3 3 0 1 1 5 2.2c-1.3 1-2 1.4-2 2.8m0 3h.01"/>',
  'circle-slash':'<circle cx="12" cy="12" r="8"/><path d="m6.35 6.35 11.3 11.3"/>',
  refresh:'<path d="M20 7a9 9 0 0 0-15-2L2 8m0-6v6h6M4 17a9 9 0 0 0 15 2l3-3m0 6v-6h-6"/>',
  plus:'<path d="M12 5v14M5 12h14"/>',
@@ -270,7 +271,7 @@ function firmwareBadge(status, labelOverride) {
  const statuses={
   current:['Current','online'], update_needed:['Update needed','update-needed'],
   newer_published:['Newer release published','release-published'],
-  checking:['Checking firmware…','pending'], unverified:['Unverified','pending'],
+  checking:['Checking firmware…','pending'], unverified:['Unverified','pending','circle-question'],
   unsupported:['Unsupported','unsupported','circle-slash']
  };
  const [label,style,symbol='shield']=statuses[status]||statuses.unverified;
