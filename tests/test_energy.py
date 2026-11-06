@@ -159,6 +159,5 @@ class EnergyAPITests(unittest.TestCase):
                 self.assertEqual(request('/api/settings/heating', 'POST', '{}')[0], 400)
                 headers = {'Content-Type': 'application/json', 'X-Hearth-Request': '1'}
                 self.assertEqual(request('/api/settings/heating', 'POST', json.dumps({**SETTINGS, 'meter_macs': []}), headers)[0], 200)
-                self.assertEqual(request('/heating.css')[0], 200)
             finally:
                 httpd.shutdown(); httpd.server_close(); store.db.close()

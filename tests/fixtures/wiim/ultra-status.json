@@ -1,0 +1,10 @@
+{
+  "project": "WiiM_Ultra",
+  "upnp_uuid": "uuid:12345678-1234-1234-1234-123456789abc",
+  "MAC": "02:00:00:00:00:01",
+  "apcli0": "192.168.1.10",
+  "eth0": "0.0.0.0",
+  "firmware": "Linkplay.5.2.833832",
+  "VersionUpdate": "0",
+  "NewVer": "0"
+}

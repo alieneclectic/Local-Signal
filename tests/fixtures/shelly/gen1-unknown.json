@@ -1,0 +1,4 @@
+{
+  "info": {"type": "SHHT-1", "mac": "020000000002", "fw": "20250101-010101/v1.0.0@1111111"},
+  "status": {"update": {"status": "unknown", "has_update": false, "new_version": ""}}
+}
