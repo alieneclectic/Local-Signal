@@ -128,9 +128,9 @@ async function refreshFirmwareCatalog(source) {
 async function loadHistory() {
  const range=state.range, poll=state.collector.last_poll;
  try {
-  const {samples}=await api(`/api/history?hours=${range}`);
+  const {samples,held=[],heartbeat_seconds:heartbeat=600}=await api(`/api/history?hours=${range}`);
   if(range!==state.range)return;
-  state.samples=samples;state.lastHistory={poll,range};state.historyError=null;
+  state.samples=samples;state.held=new Set(held);state.heartbeat=heartbeat;state.lastHistory={poll,range};state.historyError=null;
  } catch(e) { if(range===state.range)state.historyError=e.message; }
 }
 function updateChrome() {
@@ -178,7 +178,7 @@ function chartPanel() {
  const options=new Map([['latency_ms','Network latency'],['rssi_dbm','Wi-Fi signal'],['uptime_s','Uptime'],['power_w','Power'],['internal_temperature_c','Internal temperature'],['temperature_c','Sensor temperature'],['humidity_pct','Humidity'],['volume_pct','Volume'],['component_volume_pct','Component level']]);
  for(const sample of state.samples) if(!options.has(sample.metric)) options.set(sample.metric,sample.label);
  if(!options.has(state.metric)) options.set(state.metric,state.metric);
- return `<section class="panel"><div class="panel-heading"><div><h2>Readings over time</h2><p>Compare devices across a selected metric and time range.</p></div><a class="button secondary" href="/api/export.csv?hours=${state.range}">${icon('download')}Export CSV</a></div><div class="chart-controls"><label class="select-wrap">${icon('chart')}<select id="metric-select" aria-label="Device metric">${[...options].map(([key,label])=>`<option value="${esc(key)}" ${key===state.metric?'selected':''}>${esc(label)}</option>`).join('')}</select>${icon('down')}</label><div class="segmented" aria-label="Time range">${[[1,'1h'],[6,'6h'],[24,'24h'],[168,'7d']].map(([n,s])=>`<button id="history-range-${n}" class="${state.range===n?'selected':''}" data-range="${n}" aria-pressed="${state.range===n}">${s}</button>`).join('')}</div></div><div class="chart-wrap">${buildChart(options.get(state.metric))}</div><div class="chart-legend">${chartLegend()}</div><div class="chart-note" title="Charts average readings across long ranges. CSV exports contain every collected sample.">${icon('info')} ${state.metric.includes('internal_temperature')?'Internal temperature is measured inside the device.':'Gaps mean no reading was collected. Local Signal saves history while the collector runs.'}</div></section>`;
+ return `<section class="panel"><div class="panel-heading"><div><h2>Readings over time</h2><p>Compare devices across a selected metric and time range.</p></div><a class="button secondary" href="/api/export.csv?hours=${state.range}">${icon('download')}Export CSV</a></div><div class="chart-controls"><label class="select-wrap">${icon('chart')}<select id="metric-select" aria-label="Device metric">${[...options].map(([key,label])=>`<option value="${esc(key)}" ${key===state.metric?'selected':''}>${esc(label)}</option>`).join('')}</select>${icon('down')}</label><div class="segmented" aria-label="Time range">${[[1,'1h'],[6,'6h'],[24,'24h'],[168,'7d']].map(([n,s])=>`<button id="history-range-${n}" class="${state.range===n?'selected':''}" data-range="${n}" aria-pressed="${state.range===n}">${s}</button>`).join('')}</div></div><div class="chart-wrap">${buildChart(options.get(state.metric))}</div><div class="chart-legend">${chartLegend()}</div><div class="chart-note" title="Charts average readings across long ranges. CSV exports contain every stored sample. Volume, mute, relay, signal and battery readings are stored when they change, and at least every 10 minutes while unchanged.">${icon('info')} ${state.metric.includes('internal_temperature')?'Internal temperature is measured inside the device.':'Gaps mean no reading was collected. Local Signal saves history while the collector runs.'}</div></section>`;
 }
 function seriesData() {
  const grouped=new Map();
@@ -215,7 +215,7 @@ function buildChart(metricLabel) {
  for(let i=0;i<=ticks;i++){const t=start+(end-start)*i/ticks,xx=left+(w-left-right)*i/ticks;svg+=`<text x="${xx}" y="${h-7}" text-anchor="${i===0?'start':i===ticks?'end':'middle'}">${(span>86400000?new Date(t).toLocaleString([],{month:'short',day:'numeric',hour:'numeric'}):new Date(t).toLocaleTimeString([],{hour:'numeric',minute:'2-digit'}))}</text>`;}
  series.forEach((s,i)=>{
   const step=Math.max(1,Math.floor(s.points.length/300)), points=s.points.filter((_,j)=>j%step===0||j===s.points.length-1);
-  const gap=Math.max(90000,((Math.max(...timestamps)-Math.min(...timestamps))/300)*2.5),segments=[];let segment=[];
+  const gap=Math.max(90000,((Math.max(...timestamps)-Math.min(...timestamps))/300)*2.5,state.held?.has(state.metric)?state.heartbeat*1500:0),segments=[];let segment=[];
   for(const point of points) {if(segment.length && Date.parse(point.at)-Date.parse(segment.at(-1).at)>gap){segments.push(segment);segment=[];} segment.push(point);}if(segment.length) segments.push(segment);
   for(const seg of segments){const line=seg.map((p,j)=>`${j?'L':'M'}${x(p.at).toFixed(2)},${y(p.value).toFixed(2)}`).join(' ');if(seg.length>1)svg+=`<path d="${line} L${x(seg.at(-1).at)},${h-bottom} L${x(seg[0].at)},${h-bottom} Z" fill="url(#fill-${i})"/><path d="${line}" fill="none" stroke="${s.color}" stroke-width="2.4" stroke-linejoin="round"/>`;}
   const latest=points.at(-1); svg+=`<circle class="chart-latest" cx="${x(latest.at)}" cy="${y(latest.value)}" r="5" fill="${s.color}" stroke-width="2"><title>${esc(s.device.name)}: ${esc(metricFormat(latest))} at ${esc(dateTime(latest.at))}</title></circle>`;

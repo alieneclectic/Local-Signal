@@ -126,7 +126,7 @@ class HistoryTests(unittest.TestCase):
                 'metrics':{'volume_pct':{'value':20,'unit':'%','label':'Volume'},'playback_state':{'value':state,'unit':'','label':'Playback'}}})
         rows=self.store.history(ip=self.ip)
         self.assertEqual(len([r for r in rows if r['metric']=='playback_state']),2)
-        self.assertEqual(len([r for r in rows if r['metric']=='volume_pct']),3)
+        self.assertEqual(len([r for r in rows if r['metric']=='volume_pct']),1)  # An unchanged held reading is stored once.
         chart=self.store.history(ip=self.ip,chart=True)
         self.assertTrue(all(isinstance(r['value'],(float,int)) for r in chart))
         self.assertEqual(self.store.devices()[-1]['metrics']['playback_state']['value'],'Paused')

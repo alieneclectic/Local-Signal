@@ -40,6 +40,12 @@ WEB_ASSETS = ('/index.html', '/app.js', '/theme.js', '/style.css', '/favicon.svg
 DEV_RELOAD = os.environ.get('LOCAL_SIGNAL_DEV_RELOAD')
 POLL_SECONDS = 30
 RETENTION_DAYS = 30
+# Slow-changing readings are stored when they change, and at most this often when they do not.
+# The value history is lossless: an omitted row repeats the previous stored value.
+SAMPLE_HEARTBEAT_SECONDS = 600
+HELD_METRICS = frozenset({'muted', 'headphones_connected', 'volume_pct', 'component_volume_pct',
+                          'rssi_dbm', 'battery_pct'})
+HELD_METRIC_PREFIXES = ('relay_',)
 ROOM_NAMES = {'first-floor': 'First floor', 'second-floor': 'Second floor'}
 MAX_BODY = 16_384
 FIRMWARE_CATALOGS = {'shelly': shelly, 'wiim': wiim, 'sonos': sonos, 'nest': nest, 'cast': cast}
@@ -67,6 +73,11 @@ def local_ip(value):
 
 def number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def held_metric(key):
+    """Whether repeated identical readings of this metric are stored only as a heartbeat."""
+    return key in HELD_METRICS or key.startswith(HELD_METRIC_PREFIXES)
 
 
 def csv_value(value):
@@ -384,6 +395,13 @@ class Store:
         if not self.setting('heating'):
             self.save_setting('heating', energy.DEFAULT_SETTINGS)
         self.db.commit()
+        # Last stored (value, time) per held reading, so repeats can be skipped. Anything older
+        # than the heartbeat would be stored again anyway, so only recent rows need loading.
+        self.last_stored = {}
+        warm = datetime.fromtimestamp(time.time() - SAMPLE_HEARTBEAT_SECONDS, timezone.utc).isoformat(timespec='seconds')
+        for row in self.db.execute('SELECT ip,metric,value,MAX(at) AS at FROM samples WHERE at>=? GROUP BY ip,metric', (warm,)):
+            if held_metric(row['metric']):
+                self.last_stored[(row['ip'], row['metric'])] = (row['value'], datetime.fromisoformat(row['at']).timestamp())
 
     def setting(self, key, default=None):
         with self.lock:
@@ -447,7 +465,14 @@ class Store:
                 devices.append(item)
             return devices
 
+    def sample_due(self, ip, key, value, stamp):
+        if not held_metric(key):
+            return True
+        last = self.last_stored.get((ip, key))
+        return last is None or last[0] != value or stamp - last[1] >= SAMPLE_HEARTBEAT_SECONDS
+
     def record(self, ip, result):
+        stored = {}
         with self.lock, self.db:
             row = self.db.execute('SELECT * FROM devices WHERE ip=?', (ip,)).fetchone()
             if not row:
@@ -484,10 +509,14 @@ class Store:
                         relay_state = 'on' if reading['value'] else 'off'
                         self.event(ip, 'relay_changed', f'{row["name"]}: {reading["label"].lower()} is now {relay_state}.')
             self.db.execute('UPDATE devices SET payload=?,last_seen=?,last_telemetry=? WHERE ip=?', (json.dumps(payload), last_seen, last_telemetry, ip))
+            stamp = datetime.fromisoformat(result['checked_at']).timestamp()
             for key, metric in result.get('metrics', {}).items():
                 if number(metric.get('value')):
-                    self.db.execute('INSERT INTO samples(ip,at,metric,value,unit,label) VALUES(?,?,?,?,?,?)',
-                                    (ip, result['checked_at'], key, metric['value'], metric['unit'], metric['label']))
+                    if self.sample_due(ip, key, metric['value'], stamp):
+                        self.db.execute('INSERT INTO samples(ip,at,metric,value,unit,label) VALUES(?,?,?,?,?,?)',
+                                        (ip, result['checked_at'], key, metric['value'], metric['unit'], metric['label']))
+                        if held_metric(key):
+                            stored[(ip, key)] = (metric['value'], stamp)
                 elif isinstance(metric.get('value'), str) and len(metric['value']) <= 200:
                     previous = old.get('latest_metrics', {}).get(key, {}).get('value')
                     if previous != metric['value']:
@@ -506,6 +535,7 @@ class Store:
                                            (check['device_id'], check['channel'], version))
                 if inserted.rowcount:
                     self.event(ip, 'firmware_update_available', f'Firmware {version} is available for {row["name"]}.')
+        self.last_stored.update(stored)
         if result.get('reported_name'):
             self.apply_names([{'ip':ip, 'name':result['reported_name'], 'source':'Device API'}])
 
@@ -694,6 +724,32 @@ class Store:
                          'info': device['info'], 'model': 'Shelly H&T', 'kind': 'sensor', 'mac': device['mac'],
                          'protocol': 'shelly-gen1', 'raw_coiot': report['raw'], 'raw_coiot_at': stamp})
         return True
+
+    def compact_history(self):
+        """Drop stored repeats of held readings, then reclaim the file space.
+
+        A reading is removed only when the rows before and after it hold the same value and it is
+        not the first row of its heartbeat window, so every change, every run edge, and one row
+        per window remain. Returns (rows_removed, rows_remaining).
+        """
+        prefixes = [prefix.replace('\\', '\\\\').replace('_', '\\_') + '%' for prefix in HELD_METRIC_PREFIXES]
+        held = f"(metric IN ({','.join('?' * len(HELD_METRICS))})" + ''.join(" OR metric LIKE ? ESCAPE '\\'" for _ in prefixes) + ')'
+        params = [*sorted(HELD_METRICS), *prefixes]
+        bucket = f"CAST(strftime('%s',at) AS INTEGER)/{SAMPLE_HEARTBEAT_SECONDS}"
+        with self.lock:
+            before = self.db.execute('SELECT COUNT(*) FROM samples').fetchone()[0]
+            self.db.execute(f'''DELETE FROM samples WHERE id IN (
+                SELECT id FROM (
+                  SELECT id, value, LAG(value) OVER w AS previous, LEAD(value) OVER w AS next,
+                         {bucket} AS bucket, LAG({bucket}) OVER w AS previous_bucket
+                  FROM samples WHERE {held}
+                  WINDOW w AS (PARTITION BY ip,metric ORDER BY at,id))
+                WHERE previous = value AND next = value AND previous_bucket = bucket)''', params)
+            self.db.commit()
+            after = self.db.execute('SELECT COUNT(*) FROM samples').fetchone()[0]
+            self.db.execute('VACUUM')
+            self.db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+        return before - after, after
 
     def cleanup(self):
         cutoff = datetime.fromtimestamp(time.time() - RETENTION_DAYS * 86400, timezone.utc).isoformat(timespec='seconds')
@@ -1040,7 +1096,9 @@ class Handler(SimpleHTTPRequestHandler):
             except ValueError as exc:
                 return self.send_json({'error': str(exc)}, 400)
             if parsed.path == '/api/history':
-                return self.send_json({'samples': rows, 'hours': hours})
+                held = sorted({row['metric'] for row in rows if held_metric(row['metric'])})
+                return self.send_json({'samples': rows, 'hours': hours, 'held': held,
+                                       'heartbeat_seconds': SAMPLE_HEARTBEAT_SECONDS})
             output = io.StringIO(newline='')
             writer = csv.DictWriter(output, fieldnames=['ip', 'at', 'metric', 'value', 'unit', 'label'])
             writer.writeheader()
@@ -1175,6 +1233,8 @@ def main(argv=None, *, default_data=ROOT / '.data' / 'hearth.sqlite3', open_brow
     parser.add_argument('--data', type=Path, default=default_data)
     parser.add_argument('--no-collector', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--background', action='store_true', help='Enable managed logging and the collection watchdog.')
+    parser.add_argument('--compact-history', action='store_true',
+                        help='Back up the database, remove stored repeats of unchanged readings, reclaim space, then exit.')
     router_setup = parser.add_mutually_exclusive_group()
     router_setup.add_argument('--router', nargs=2, metavar=('ADAPTER', 'ACTION'),
                               help=f"Connect or disconnect a router adapter, then exit. Available: {', '.join(routers.ADAPTERS)}.")
@@ -1194,6 +1254,16 @@ def main(argv=None, *, default_data=ROOT / '.data' / 'hearth.sqlite3', open_brow
             parser.exit(1, f'{exc}\n')
         except (OSError, EOFError):
             parser.exit(1, 'Router setup could not finish.\n')
+        return
+    if args.compact_history:
+        if not args.data.is_file():
+            parser.exit(1, f'No database found at {args.data}.\n')
+        size = args.data.stat().st_size
+        backup = reliability.backup_database(args.data, args.data.parent / 'backups')
+        print(f"Backed up to {args.data.parent / 'backups' / backup['file']}")
+        removed, remaining = Store(args.data).compact_history()
+        print(f'Removed {removed:,} repeated readings; {remaining:,} remain.')
+        print(f'Database: {size / 1048576:.1f} MB -> {args.data.stat().st_size / 1048576:.1f} MB')
         return
     open_browser = open_browser and not args.background and not args.no_collector
     url = f'http://127.0.0.1:{args.port}'
