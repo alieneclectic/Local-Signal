@@ -313,10 +313,11 @@ function firmwareDetails(finding, reportedVersion) {
  </section>`;
 }
 function inventoryCard(device, finding) {
+ const firmware = firmwareBadge(finding ? firmwareStatus(finding) : 'unsupported');
  return `<details class="panel inventory-card" data-inventory-ip="${esc(device.ip)}" ${openDeviceCards.has(device.ip)?'open':''}>
   <summary class="inventory-card-heading">
    <span class="inventory-identity"><strong>${esc(device.name)}</strong><span class="mono muted">${esc(device.ip)}</span></span>
-   <span class="inventory-statuses">${badge(device)}${firmwareSummaryBadge(finding,device)}</span>
+   <span class="inventory-statuses">${badge(device)}${firmware}</span>
    ${icon('down','inventory-chevron')}
   </summary>
   <div class="inventory-card-details">
