@@ -72,6 +72,25 @@ def launchctl(*args, check=True):
     return subprocess.run(['/bin/launchctl', *args], capture_output=True, text=True, check=check)
 
 
+def wait_for_unload(timeout=30):
+    """bootout can return before launchd has finished removing the service."""
+    deadline = time.monotonic() + timeout
+    while launchctl('print', f'{DOMAIN}/{LABEL}', check=False).returncode == 0:
+        if time.monotonic() > deadline:
+            raise RuntimeError('The previous collector did not stop.')
+        time.sleep(.25)
+
+
+def bootstrap(plist, attempts=40):
+    """launchd refuses a bootstrap (I/O error) while the previous instance is still being torn down."""
+    for _ in range(attempts):
+        result = launchctl('bootstrap', DOMAIN, str(plist), check=False)
+        if result.returncode == 0:
+            return
+        time.sleep(.5)
+    raise subprocess.CalledProcessError(result.returncode, result.args, result.stdout, result.stderr)
+
+
 def live_state():
     try:
         with build_opener(ProxyHandler({})).open('http://127.0.0.1:8799/api/state', timeout=3) as response:
@@ -147,6 +166,7 @@ def install(follow_checkout=None):
     old_pid = None if running_agent else legacy_pid()
     if running_agent:
         launchctl('bootout', f'{DOMAIN}/{LABEL}')
+        wait_for_unload()
     if old_pid:
         os.kill(old_pid, signal.SIGTERM)
         for _ in range(50):
@@ -180,7 +200,7 @@ def install(follow_checkout=None):
             agent_config(python, runtime, data, app / 'Contents/MacOS/Hearth', checkout=checkout)))
         temporary_plist.replace(PLIST)
         launchctl('enable', f'{DOMAIN}/{LABEL}')
-        launchctl('bootstrap', DOMAIN, str(PLIST))
+        bootstrap(PLIST)
         for _ in range(80):
             state = live_state()
             if state and state['collector'].get('background') and state['collector'].get('database_path') == str(data):
@@ -191,6 +211,10 @@ def install(follow_checkout=None):
         raise RuntimeError('The installed collector did not become reachable. Check the local logs.')
     except Exception:
         launchctl('bootout', f'{DOMAIN}/{LABEL}', check=False)
+        try:
+            wait_for_unload()
+        except RuntimeError:
+            pass
         if previous_app.exists():
             if app.exists():
                 shutil.rmtree(app)
@@ -201,7 +225,11 @@ def install(follow_checkout=None):
             previous.rename(runtime)
         if old_plist:
             PLIST.write_bytes(old_plist)
-            launchctl('bootstrap', DOMAIN, str(PLIST), check=False)
+            try:
+                bootstrap(PLIST)
+            except subprocess.CalledProcessError:
+                print('Background collection is stopped: the previous collector could not be restarted. '
+                      f'Run: launchctl bootstrap {DOMAIN} "{PLIST}"', file=sys.stderr)
         else:
             PLIST.unlink(missing_ok=True)
         if old_pid:

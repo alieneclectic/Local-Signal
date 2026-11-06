@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from contextlib import closing
 from pathlib import Path
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -76,6 +77,28 @@ class BackupTests(unittest.TestCase):
                 source, _ = dev.checkout_snapshot(checkout)
                 self.assertEqual(source, checkout)
 
+
+class LaunchdTests(unittest.TestCase):
+    @staticmethod
+    def result(code):
+        return subprocess.CompletedProcess(['/bin/launchctl'], code, '', '')
+
+    def test_bootstrap_retries_while_launchd_is_still_removing_the_old_agent(self):
+        calls = [self.result(5), self.result(5), self.result(0)]
+        with patch.object(background, 'launchctl', side_effect=calls) as run, patch.object(background.time, 'sleep'):
+            background.bootstrap(Path('/tmp/agent.plist'))
+        self.assertEqual(run.call_count, 3)
+
+    def test_bootstrap_gives_up_with_an_error_instead_of_silently(self):
+        with patch.object(background, 'launchctl', return_value=self.result(5)), patch.object(background.time, 'sleep'):
+            with self.assertRaises(subprocess.CalledProcessError):
+                background.bootstrap(Path('/tmp/agent.plist'), attempts=3)
+
+    def test_install_waits_until_the_old_agent_is_gone(self):
+        calls = [self.result(0), self.result(0), self.result(113)]
+        with patch.object(background, 'launchctl', side_effect=calls) as run, patch.object(background.time, 'sleep'):
+            background.wait_for_unload()
+        self.assertEqual(run.call_count, 3)
 
 class CollectionRecoveryTests(unittest.TestCase):
     def setUp(self):
