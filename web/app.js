@@ -63,6 +63,8 @@ const firmwareGuides = {
   steps:'In Google Home, touch and hold the device’s tile, then open Settings → Device information → Technical information.'},
  riva: {label:'RIVA Audio firmware guide', url:'https://www.rivaaudio.com/firmware-updates',
   steps:'To check for speaker updates, open RIVA Voice (iOS) or Riva Audio (Android) on the same Wi-Fi network. Select your Festival, open its settings, and look for Update Firmware at the bottom. The version shown here is the speaker’s Cast build.'},
+ myq: {label:'myQ device settings guide', url:'https://support.chamberlaingroup.com/s/article/myQ-app-Navigating-to-Device-Settings',
+  steps:'In the myQ app, open Settings or Menu → Devices. Under Hubs, choose your opener or hub, then select the paired opener if shown. Look for the firmware version in Device Settings.'},
 };
 const timeAgo = (value) => { if (!value) return 'Not yet'; const s = Math.max(0, (Date.now()-Date.parse(value))/1000); return s<15?'Just now':s<60?`${Math.floor(s)}s ago`:s<3600?`${Math.floor(s/60)}m ago`:s<86400?`${Math.floor(s/3600)}h ago`:`${Math.floor(s/86400)}d ago`; };
 const dateTime = value => value ? new Date(value).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) : 'Not yet';
@@ -259,7 +261,13 @@ function activityPanel(full=false, firmwareOnly=false) {
  const icons={discovered:'plus',online:'activity',unreachable:'moon',firmware_update_available:'shield'};
  return `<section class="panel activity-panel"><div class="panel-heading"><div><h2>${title}</h2><p>${description}</p></div><span class="activity-label">${icon('clock')} Live log</span></div><div class="activity-list">${events.length?events.map(e=>`<div class="activity-row"><span class="event-icon ${e.type==='online'?'positive':''}">${icon(icons[e.type]||'wifi')}</span><div><p>${esc(e.message)}</p><small>${esc(e.ip||'Local collector')}</small></div><time title="${esc(dateTime(e.at))}">${timeAgo(e.at)}</time></div>`).join(''):`<div class="empty-state small"><p>${empty}</p></div>`}</div></section>`;
 }
-function firmwareStatus(finding) {
+function manualFirmwareGuide(device) {
+ const names=[device.model, device.advertised_model, device.hostname, device.discovered_name, device.name];
+ const myqName=/(?:^|[^a-z0-9])(?:lift[ _-]?master|my[ _-]?q)(?=$|[^a-z0-9])/i;
+ return names.some(name=>myqName.test(name||'')) ? firmwareGuides.myq : null;
+}
+function firmwareStatus(finding, device) {
+ if(!finding)return manualFirmwareGuide(device) ? 'manual' : 'unsupported';
  if(finding.stable_status!=='unverified')return finding.stable_status;
  const source=finding.catalog_id;
  const waitingForReport=!finding.installed_version && !finding.checked_at;
@@ -272,6 +280,7 @@ function firmwareBadge(status, labelOverride) {
   current:['Current','online'], update_needed:['Update needed','update-needed'],
   newer_published:['Newer release published','release-published'],
   checking:['Checking firmware…','pending'], unverified:['Unverified','pending','circle-question'],
+  manual:['Manual check','pending','circle-question'],
   unsupported:['Unsupported','unsupported','circle-slash']
  };
  const [label,style,symbol='shield']=statuses[status]||statuses.unverified;
@@ -279,14 +288,21 @@ function firmwareBadge(status, labelOverride) {
  return `<span class="status-badge firmware-badge ${style}"${explanation}>${icon(symbol)}<span class="visually-hidden">Firmware: </span>${labelOverride||label}</span>`;
 }
 function firmwareSummaryBadge(finding, device) {
- if(finding)return firmwareBadge(firmwareStatus(finding));
+ const status=firmwareStatus(finding,device);
+ if(status!=='unsupported')return firmwareBadge(status);
  if(device.protocol||device.model||device.advertised_model||device.firmware)return firmwareBadge('unsupported','No firmware check');
  return '';
 }
-function firmwareDetails(finding, reportedVersion) {
+function firmwareGuideMarkup(guide, heading) {
+ return `<div class="firmware-guide"><p><strong>${heading}</strong></p><p>${guide.steps}</p><a href="${guide.url}" target="_blank" rel="noopener noreferrer">${guide.label}</a></div>`;
+}
+function firmwareDetails(finding, device) {
+ const reportedVersion=device.firmware;
+ const manualGuide=!finding && manualFirmwareGuide(device);
  if(!finding)return `<section class="device-firmware">
-  <div class="device-firmware-heading"><h3>Firmware</h3>${firmwareBadge('unsupported')}</div>
+  <div class="device-firmware-heading"><h3>Firmware</h3>${firmwareBadge(manualGuide?'manual':'unsupported')}</div>
   ${reportedVersion ? `<dl class="firmware-versions"><div><dt>Reported version</dt><dd>${esc(reportedVersion)}</dd></div></dl>` : ''}
+  ${manualGuide ? firmwareGuideMarkup(manualGuide,'Where to check') : ''}
  </section>`;
 
  const status=firmwareStatus(finding);
@@ -309,11 +325,11 @@ function firmwareDetails(finding, reportedVersion) {
   </dl>
   ${checked ? `<p class="firmware-source muted">${source} · <time datetime="${esc(checked)}">${esc(dateTime(checked))}</time></p>` : ''}
   ${finding.status==='stale' ? '<p class="muted">The last device report is out of date.</p>' : ''}
-  ${guide ? `<div class="firmware-guide"><p><strong>${guideHeading}</strong></p><p>${guide.steps}</p><a href="${guide.url}" target="_blank" rel="noopener noreferrer">${guide.label}</a></div>` : ''}
+  ${guide ? firmwareGuideMarkup(guide,guideHeading) : ''}
  </section>`;
 }
 function inventoryCard(device, finding) {
- const firmware = firmwareBadge(finding ? firmwareStatus(finding) : 'unsupported');
+ const firmware = firmwareBadge(firmwareStatus(finding,device));
  return `<details class="panel inventory-card" data-inventory-ip="${esc(device.ip)}" ${openDeviceCards.has(device.ip)?'open':''}>
   <summary class="inventory-card-heading">
    <span class="inventory-identity"><strong>${esc(device.name)}</strong><span class="mono muted">${esc(device.ip)}</span></span>
@@ -324,7 +340,7 @@ function inventoryCard(device, finding) {
    <p class="device-meta">${esc(device.room)} · ${esc(deviceModel(device))}</p>
    ${deviceReadout(device)}
    <p class="muted inventory-recency">${deviceRecency(device)}</p>
-   ${firmwareDetails(finding,device.firmware)}
+   ${firmwareDetails(finding,device)}
    <button type="button" class="text-button" data-device="${esc(device.ip)}">Device details ${icon('arrow')}</button>
   </div>
  </details>`;
@@ -334,7 +350,7 @@ function matchesDeviceFilter({device, finding}, filter) {
   case 'all': return true;
   case 'saved': return device.pinned;
   case 'unidentified': return !device.kind;
-  case 'firmware': return Boolean(finding);
+  case 'firmware': return Boolean(finding || manualFirmwareGuide(device));
   case 'updates': return finding?.stable_status==='update_needed';
   default: return device.kind===filter;
  }
@@ -474,7 +490,7 @@ function openDetail(ip) {
  const finding=state.firmware.find(row=>row.ip===ip);
  const entries=Object.entries(d.metrics||{}).filter(([k])=>!/^power_\d+_w$/.test(k));
  const lastEntries=d.status!=='online'?Object.entries(d.last_metrics||{}).filter(([k])=>!/^power_\d+_w$/.test(k)&&k!=='latency_ms'):[];
- $('#detail-content').innerHTML=`<div class="modal-heading"><div class="detail-header"><span class="device-type-icon sage">${icon(deviceIcon(d))}</span><div><span class="eyebrow">${esc(d.model||d.advertised_model||(d.discovered_name?'NETWORK DEVICE':'UNIDENTIFIED DEVICE'))}</span><h2 id="detail-title">${esc(d.name)}</h2></div></div><button class="icon-button close-detail" aria-label="Close device details">${icon('close')}</button></div><div class="detail-status">${badge(d)}<span class="mono muted">${esc(d.ip)}</span>${firmwareSummaryBadge(finding,d)}</div>${d.discovered_name?`<div class="discovered-identity"><div>${icon('wifi')}<strong>Discovered identity</strong><span>${esc(d.discovered_name_source)}</span></div><p>${esc(d.discovered_name)}</p>${d.hostname?`<small class="mono">${esc(d.hostname)}</small>`:''}<small>Observed ${timeAgo(d.name_discovered_at)}${d.name_mode==='manual'?' · Custom display name preserved':' · Used as the display name'}</small></div>`:''}${d.error?`<div class="notice warning">${icon('info')}${esc(d.error)}</div>`:''}${d.telemetry_note?`<div class="notice">${icon('info')}${esc(d.telemetry_note)}</div>`:''}<div class="detail-metrics">${entries.map(([k,m])=>`<div><span>${esc(m.label)}</span><strong>${k.startsWith('relay_')?m.value?'On':'Off':metricFormat(m)}</strong></div>`).join('')||'<div><span>Telemetry</span><strong>No readings yet</strong></div>'}</div>${lastEntries.length?`<details class="last-readings"><summary>Last successful telemetry · ${dateTime(d.last_telemetry)}</summary><p class="muted">Historical readings, not current device state.</p><div class="detail-metrics stale">${lastEntries.map(([k,m])=>`<div><span>${esc(m.label)}</span><strong>${metricFormat(m)}</strong></div>`).join('')}</div></details>`:''}<dl class="device-info-list"><div><dt>Last seen on network</dt><dd>${dateTime(d.last_seen)}</dd></div><div><dt>Last successful telemetry</dt><dd>${dateTime(d.last_telemetry)}</dd></div><div><dt>MAC address</dt><dd class="mono">${esc(d.mac||'Not observed')}</dd></div></dl>${firmwareDetails(finding,d.firmware)}${Object.keys(d.metrics||{}).some(k=>k.includes('internal_temperature'))?`<div class="notice">${icon('temp')}Internal device temperature is not the room temperature.</div>`:''}<form id="edit-form"><div class="detail-edit-heading"><h3>Make it yours</h3><span>Workspace labels only</span></div><div class="form-row"><label>Device name<input name="name" value="${esc(d.name)}" maxlength="100" required></label><label>Room<input name="room" value="${esc(d.room)}" maxlength="100" required></label></div><label>Notes<textarea name="notes" rows="2" maxlength="1000">${esc(d.notes)}</textarea></label><div class="detail-checks"><label class="check-label"><input name="auto_name" type="checkbox" ${d.name_mode==='auto'?'checked':''}>Use discovered name when available</label><label class="check-label"><input name="pinned" type="checkbox" ${d.pinned?'checked':''}>Show in My devices</label><label class="check-label"><input name="expected_sleep" type="checkbox" ${d.expected_sleep?'checked':''}>Battery device that sleeps</label></div><p id="edit-error" class="form-error" role="alert"></p><div class="detail-actions"><a class="button secondary" href="/api/export.csv?hours=${state.range}&ip=${esc(d.ip)}">${icon('download')}Export history</a><button class="button primary" type="submit">${icon('check')}Save details</button></div></form>${d.raw_status?`<details class="raw-details"><summary>Last API snapshot <span>${dateTime(d.raw_status_at||d.last_telemetry)}</span></summary><pre>${esc(JSON.stringify(d.raw_status,null,2))}</pre></details>`:''}`;
+ $('#detail-content').innerHTML=`<div class="modal-heading"><div class="detail-header"><span class="device-type-icon sage">${icon(deviceIcon(d))}</span><div><span class="eyebrow">${esc(d.model||d.advertised_model||(d.discovered_name?'NETWORK DEVICE':'UNIDENTIFIED DEVICE'))}</span><h2 id="detail-title">${esc(d.name)}</h2></div></div><button class="icon-button close-detail" aria-label="Close device details">${icon('close')}</button></div><div class="detail-status">${badge(d)}<span class="mono muted">${esc(d.ip)}</span>${firmwareSummaryBadge(finding,d)}</div>${d.discovered_name?`<div class="discovered-identity"><div>${icon('wifi')}<strong>Discovered identity</strong><span>${esc(d.discovered_name_source)}</span></div><p>${esc(d.discovered_name)}</p>${d.hostname?`<small class="mono">${esc(d.hostname)}</small>`:''}<small>Observed ${timeAgo(d.name_discovered_at)}${d.name_mode==='manual'?' · Custom display name preserved':' · Used as the display name'}</small></div>`:''}${d.error?`<div class="notice warning">${icon('info')}${esc(d.error)}</div>`:''}${d.telemetry_note?`<div class="notice">${icon('info')}${esc(d.telemetry_note)}</div>`:''}<div class="detail-metrics">${entries.map(([k,m])=>`<div><span>${esc(m.label)}</span><strong>${k.startsWith('relay_')?m.value?'On':'Off':metricFormat(m)}</strong></div>`).join('')||'<div><span>Telemetry</span><strong>No readings yet</strong></div>'}</div>${lastEntries.length?`<details class="last-readings"><summary>Last successful telemetry · ${dateTime(d.last_telemetry)}</summary><p class="muted">Historical readings, not current device state.</p><div class="detail-metrics stale">${lastEntries.map(([k,m])=>`<div><span>${esc(m.label)}</span><strong>${metricFormat(m)}</strong></div>`).join('')}</div></details>`:''}<dl class="device-info-list"><div><dt>Last seen on network</dt><dd>${dateTime(d.last_seen)}</dd></div><div><dt>Last successful telemetry</dt><dd>${dateTime(d.last_telemetry)}</dd></div><div><dt>MAC address</dt><dd class="mono">${esc(d.mac||'Not observed')}</dd></div></dl>${firmwareDetails(finding,d)}${Object.keys(d.metrics||{}).some(k=>k.includes('internal_temperature'))?`<div class="notice">${icon('temp')}Internal device temperature is not the room temperature.</div>`:''}<form id="edit-form"><div class="detail-edit-heading"><h3>Make it yours</h3><span>Workspace labels only</span></div><div class="form-row"><label>Device name<input name="name" value="${esc(d.name)}" maxlength="100" required></label><label>Room<input name="room" value="${esc(d.room)}" maxlength="100" required></label></div><label>Notes<textarea name="notes" rows="2" maxlength="1000">${esc(d.notes)}</textarea></label><div class="detail-checks"><label class="check-label"><input name="auto_name" type="checkbox" ${d.name_mode==='auto'?'checked':''}>Use discovered name when available</label><label class="check-label"><input name="pinned" type="checkbox" ${d.pinned?'checked':''}>Show in My devices</label><label class="check-label"><input name="expected_sleep" type="checkbox" ${d.expected_sleep?'checked':''}>Battery device that sleeps</label></div><p id="edit-error" class="form-error" role="alert"></p><div class="detail-actions"><a class="button secondary" href="/api/export.csv?hours=${state.range}&ip=${esc(d.ip)}">${icon('download')}Export history</a><button class="button primary" type="submit">${icon('check')}Save details</button></div></form>${d.raw_status?`<details class="raw-details"><summary>Last API snapshot <span>${dateTime(d.raw_status_at||d.last_telemetry)}</span></summary><pre>${esc(JSON.stringify(d.raw_status,null,2))}</pre></details>`:''}`;
  if(!$('#detail-dialog').open)$('#detail-dialog').showModal();
 }
 async function scan() {
