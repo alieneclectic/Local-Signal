@@ -136,9 +136,25 @@ class APITests(unittest.TestCase):
         state=json.loads(self.request('/api/state')[2])
         self.assertEqual((state['devices'], state['events']), ([], []))
         self.assertEqual((state['firmware'], state['firmware_events']), ([], []))
+        self.assertNotIn('dev_revision', state)
         self.assertEqual(self.request('/api/history?hours=24')[0],200)
         status,headers,body=self.request('/api/export.csv?hours=24')
         self.assertEqual(status,200);self.assertIn('text/csv',headers['Content-Type']);self.assertIn(b'ip,at,metric,value,unit,label',body)
+
+    def test_development_revision_changes_with_assets_and_server_restart(self):
+        with tempfile.TemporaryDirectory() as root, patch.object(server, 'ROOT', Path(root)):
+            web = Path(root) / 'web'
+            web.mkdir()
+            asset = web / 'style.css'
+            asset.write_text('body {}')
+            with patch.object(server, 'DEV_RELOAD', 'first-worker'):
+                before = json.loads(self.request('/api/state')[2])['dev_revision']
+                asset.write_text('body { color: black; }')
+                after_edit = json.loads(self.request('/api/state')[2])['dev_revision']
+            with patch.object(server, 'DEV_RELOAD', 'second-worker'):
+                after_restart = json.loads(self.request('/api/state')[2])['dev_revision']
+            self.assertNotEqual(before, after_edit)
+            self.assertNotEqual(after_edit, after_restart)
 
     def test_cross_origin_mutations_and_dns_rebinding_are_blocked(self):
         status,_,_=self.request('/api/state',headers={'Host':'attacker.example'})

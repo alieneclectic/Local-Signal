@@ -92,6 +92,10 @@ async function load(force=false) {
  if(loading) return; loading=true;
  try {
   const data=await api('/api/state');
+  if(state.dev_revision && data.dev_revision && state.dev_revision!==data.dev_revision) {
+   location.reload();
+   return;
+  }
   const lastEventId=state.firmware_events[0]?.id ?? 0;
   const alerts=state.initial ? [] : (data.firmware_events||[]).filter(e=>e.id>lastEventId);
   Object.assign(state, data); state.connected=true; state.initial=false;

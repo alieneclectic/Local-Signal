@@ -11,14 +11,18 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 ```
 
-To preview UI changes from the repo root, start a loopback-only server on a separate port with a disposable database.
+To preview UI changes from the repo root, start the development server with a disposable database.
 
 ```sh
 local_signal_preview_dir=$(mktemp -d)
-python3 server.py --host 127.0.0.1 --port 8800 --data "$local_signal_preview_dir/preview.sqlite3" --no-collector
+python3 dev.py --data "$local_signal_preview_dir/preview.sqlite3" --no-collector
 ```
 
-Open [the local preview](http://127.0.0.1:8800/). The preview starts with an empty inventory and skips background polling and the sensor listener. Manual actions such as **Refresh**, **Scan network**, **Refresh names**, and **Add device** can still contact the network. Leave those controls alone for a UI-only preview. Press Control-C to stop the server.
+Open [the local preview](http://127.0.0.1:8800/). The dashboard reloads on its next five-second check after a frontend edit or a backend restart. Python and firmware catalog edits restart the server and its collector, ending any scan in progress. Frontend edits leave the server running. Press Control-C to stop the development server.
+
+The command above starts with an empty inventory and skips automatic polling and the sensor listener. Manual actions such as **Refresh**, **Scan network**, **Refresh names**, and **Add device** can still contact the network. Leave those controls alone for a UI-only preview. For development with live collection, run `python3 dev.py` with maintainer authorization. It uses the separate `.data/dev/hearth.sqlite3` database, polls known devices every 30 seconds after the previous cycle finishes, and scans for new devices when you select **Scan network**.
+
+The macOS background collector at `http://127.0.0.1:8799` serves an installed copy, which `start.command` opens when it is running. Use the development URL to see edits from this checkout.
 
 ## Working with an LLM
 

@@ -35,6 +35,8 @@ from urllib.parse import urlparse, parse_qs
 from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
 
 ROOT = Path(__file__).resolve().parent
+WEB_ASSETS = ('/index.html', '/app.js', '/theme.js', '/style.css', '/favicon.svg')
+DEV_RELOAD = os.environ.get('LOCAL_SIGNAL_DEV_RELOAD')
 POLL_SECONDS = 30
 RETENTION_DAYS = 30
 ROOM_NAMES = {'first-floor': 'First floor', 'second-floor': 'Second floor'}
@@ -984,8 +986,18 @@ class Handler(SimpleHTTPRequestHandler):
                     row['stable_status'] = FIRMWARE_CATALOGS[source].compare_stable(row['installed_version'], latest)
                 else:
                     row['stable_status'] = 'unverified'
-            return self.send_json({'devices': devices, 'rooms': self.store.rooms(), 'collector': self.collector.snapshot(),
-                                   'events': events, 'firmware': firmware, 'firmware_events': firmware_events})
+            data = {'devices': devices, 'rooms': self.store.rooms(), 'collector': self.collector.snapshot(),
+                    'events': events, 'firmware': firmware, 'firmware_events': firmware_events}
+            if DEV_RELOAD:
+                revision = [DEV_RELOAD]
+                for asset in WEB_ASSETS:
+                    try:
+                        stat = (ROOT / 'web' / asset[1:]).stat()
+                        revision.append(f'{stat.st_mtime_ns}-{stat.st_size}-{stat.st_ino}')
+                    except FileNotFoundError:
+                        revision.append('missing')
+                data['dev_revision'] = ':'.join(revision)
+            return self.send_json(data)
         if parsed.path in ('/api/energy', '/api/energy.csv'):
             try:
                 days = int(query.get('days', ['7'])[0])
@@ -1036,7 +1048,7 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if parsed.path.startswith('/api/'):
             return self.send_json({'error': 'Endpoint not found.'}, 404)
-        if parsed.path not in ('/', '/index.html', '/app.js', '/theme.js', '/style.css', '/favicon.svg'):
+        if parsed.path != '/' and parsed.path not in WEB_ASSETS:
             return self.send_json({'error': 'File not found.'}, 404)
         super().do_GET()
 
