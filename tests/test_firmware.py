@@ -315,4 +315,24 @@ class FirmwareFindingTests(unittest.TestCase):
                 state = handler.send_json.call_args.args[0]
                 finding, = state['firmware']
                 self.assertEqual((finding['adapter_id'], finding['stable_status']), ('cast', expected))
+                self.assertEqual(finding['guide_id'], 'cast')
                 self.assertEqual(state['firmware_events'], [])
+
+    def test_riva_finding_points_to_speaker_maker_for_updates(self):
+        check = cast.unknown(self.at.isoformat())
+        check.update(device_id='020000000004', installed_version='1.52.272222')
+        self.store.record(FIRST_IP, {
+            'protocol': 'google-cast', 'status': 'online', 'metrics': {}, 'checked_at': self.at.isoformat(),
+            'advertised_model': '0,1,2',
+            'advertised_names': [{'source': 'Local DNS', 'name': 'riva-festival-example'}],
+            'firmware_check': check, 'firmware_model': 'RIVA Festival', 'firmware_peer_mac': check['device_id'],
+        })
+        handler = Mock(store=self.store, path='/api/state')
+        handler.valid_host.return_value = True
+        handler.collector.snapshot.return_value = {}
+        server.Handler.do_GET(handler)
+        finding, = handler.send_json.call_args.args[0]['firmware']
+        self.assertEqual((finding['adapter_id'], finding['guide_id']), ('cast', 'riva'))
+        self.assertEqual(finding['installed_version'], '1.52.272222')
+        self.assertEqual(finding['stable_status'], 'unverified')
+        self.assertIsNone(finding['catalog_id'])
