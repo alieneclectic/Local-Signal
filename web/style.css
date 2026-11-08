@@ -256,3 +256,6 @@
 :root[data-theme="dark"] .relay-indicator.on { background: var(--green); }
 :root[data-theme="dark"] .relay-indicator.on::after { background: var(--bg); }
 :root[data-theme="dark"] .stale { opacity: .85; }
+
+/* Center a row whose value is a dropdown, such as History retention. */
+.settings-list > div:has(select) { align-items: center; }

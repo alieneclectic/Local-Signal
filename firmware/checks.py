@@ -63,7 +63,7 @@ def inventory(candidates, at):
     """Join observations to current addresses, choosing one row per device."""
     findings = {}
     for device, identity in candidates:
-        if identity is None:
+        if identity is None or not device['ip']:
             continue
         device_id = identity['device_id']
         saved = device.get('firmware_check')
