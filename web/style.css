@@ -259,3 +259,30 @@
 
 /* Center a row whose value is a dropdown, such as History retention. */
 .settings-list > div:has(select) { align-items: center; }
+
+/* Commercial device setup shares the add and edit forms. */
+.monitoring-setup { margin: 20px 0; }
+.monitoring-setup label { display: flex; flex-direction: column; gap: 7px; font-size: 11px; color: var(--muted); }
+.monitoring-setup select { width: 100%; min-width: 0; padding: 11px; border: 1px solid var(--line); border-radius: 7px; background: var(--paper); color: var(--ink); font: inherit; }
+:is(.bacnet-fields, .modbus-fields) { min-width: 0; margin: 16px 0 0; padding: 14px; border: 1px solid var(--line); border-radius: 8px; }
+:is(.bacnet-fields, .modbus-fields)[hidden] { display: none; }
+:is(.bacnet-fields, .modbus-fields) legend { color: var(--ink); font-size: 12px; padding: 0 5px; }
+:is(.bacnet-fields, .modbus-fields) p { font-size: 11px; line-height: 1.6; margin: 8px 0 16px; }
+.bacnet-points { display: grid; gap: 18px; margin: 18px 0; }
+.bacnet-point { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(65px, 1fr); gap: 10px; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+.bacnet-point .point-label { grid-column: 1 / -1; }
+.bacnet-point input { min-width: 0; width: 100%; }
+.bacnet-point button { justify-self: start; }
+.point-errors { margin: 12px 0 20px; padding-left: 20px; color: var(--muted); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+@media (max-width: 530px) { :is(.bacnet-fields, .modbus-fields) { padding: 10px; } .bacnet-point { grid-template-columns: minmax(0, 1fr); } }
+.detail-status { flex-wrap: wrap; }
+
+.modbus-points { display: grid; gap: 18px; margin: 18px 0; }
+.modbus-point { display: grid; min-width: 0; gap: 12px; padding-bottom: 18px; border-bottom: 1px solid var(--line); }
+.modbus-point .form-row { margin: 0; min-width: 0; }
+.modbus-point .form-row > label { min-width: 0; }
+.modbus-point input { min-width: 0; width: 100%; }
+.modbus-point button { justify-self: start; }
+.modbus-numeric { display: grid; gap: 12px; min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 7px; margin: 0; }
+.modbus-numeric[hidden], .modbus-bit-note[hidden] { display: none; }
+@media (max-width: 530px) { .modbus-point .form-row { grid-template-columns: minmax(0, 1fr); } .modbus-numeric { padding: 8px; } }

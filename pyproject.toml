@@ -16,6 +16,8 @@ sources = [
     "packaging/collector",
     "server.py",
     "coiot.py",
+    "bacnet.py",
+    "modbus.py",
     "energy.py",
     "firmware",
     "media_readers.py",
