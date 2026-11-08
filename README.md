@@ -46,7 +46,7 @@ For Windows collector setup and the Briefcase installer previews, see the [packa
 
 Discovery can find devices that don't expose telemetry. Available fields depend on the device model and what its local API exposes. Devices that sleep or sit on another subnet may be missed by a scan. Last reported readings are shown separately from fresh ones, and internal board temperature is separate from room temperature.
 
-Devices identified by a LiftMaster or myQ name show **Manual check** under **Devices → Firmware**. Expand the card for instructions on looking up the firmware version in the myQ app.
+Devices identified by a LiftMaster or myQ name show **Manual check** under **Devices → Firmware**. Expand the card for instructions on looking up the firmware version in the myQ app. If the device name or model includes **98022** or **98022MC**, the card shows the wall control instructions from the LiftMaster owner’s manual.
 
 ## Router monitoring
 

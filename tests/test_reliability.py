@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 from contextlib import closing
+import gzip
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -24,10 +25,12 @@ class BackupTests(unittest.TestCase):
                 db.commit()
                 for day in range(9):
                     result = reliability.backup_database(source, Path(folder) / 'backups', datetime(2026, 10, 1 + day, tzinfo=timezone.utc))
-                copies = sorted((Path(folder) / 'backups').glob('*.sqlite3'))
+                copies = sorted((Path(folder) / 'backups').glob('*.sqlite3.gz'))
                 self.assertEqual(len(copies), 7)
-                self.assertEqual(copies[0].name, 'hearth-2026-10-03.sqlite3')
-                with closing(sqlite3.connect(copies[-1])) as restored:
+                self.assertEqual(copies[0].name, 'hearth-2026-10-03.sqlite3.gz')
+                restored_path = Path(folder) / 'restored.sqlite3'
+                restored_path.write_bytes(gzip.decompress(copies[-1].read_bytes()))
+                with closing(sqlite3.connect(restored_path)) as restored:
                     self.assertEqual(restored.execute('SELECT value FROM history').fetchone()[0], 42)
                     self.assertEqual(restored.execute('PRAGMA quick_check').fetchone()[0], 'ok')
 

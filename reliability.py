@@ -1,9 +1,11 @@
 """Bounded local logging and consistent, rotating SQLite snapshots."""
 from datetime import datetime, timezone
 from contextlib import closing
+import gzip
 import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+import shutil
 import sqlite3
 import sys
 
@@ -28,29 +30,37 @@ def configure_logging(folder):
 
 
 def backup_database(source, folder, at=None):
-    """Publish a complete backup atomically; keep the latest seven daily copies."""
+    """Publish a complete, gzip-compressed backup atomically; keep the latest seven daily copies."""
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     stamp = (at or datetime.now(timezone.utc)).strftime('%Y-%m-%d')
-    target = folder / f'hearth-{stamp}.sqlite3'
+    target = folder / f'hearth-{stamp}.sqlite3.gz'
     temporary = folder / f'.hearth-{stamp}.tmp'
+    compressed = folder / f'.hearth-{stamp}.gz.tmp'
     try:
         with closing(sqlite3.connect(Path(source).resolve().as_uri() + '?mode=ro', uri=True)) as live:
             with closing(sqlite3.connect(temporary)) as destination:
                 live.backup(destination)
                 if destination.execute('PRAGMA quick_check').fetchone()[0] != 'ok':
                     raise sqlite3.DatabaseError('Backup integrity check failed.')
-                # backup() carries over the live WAL mode; a single self-contained file cannot leave sidecars.
+                # backup() carries over the live WAL mode; a restored copy should be one self-contained file.
                 destination.execute('PRAGMA journal_mode=DELETE')
-        temporary.chmod(0o600)
-        temporary.replace(target)
+        with temporary.open('rb') as raw, gzip.open(compressed, 'wb', compresslevel=6) as packed:
+            shutil.copyfileobj(raw, packed, 1 << 20)
+        compressed.chmod(0o600)
+        compressed.replace(target)
     finally:
         temporary.unlink(missing_ok=True)
-    # Prune by date so a backup's -wal/-shm files go with it. Only dates that still have a
-    # database count toward the seven kept, so a stray sidecar cannot displace a real backup.
+        compressed.unlink(missing_ok=True)
+    # An uncompressed copy from an earlier version for the same day is now redundant.
+    for superseded in [folder / f'hearth-{stamp}.sqlite3', *folder.glob(f'hearth-{stamp}.sqlite3-*')]:
+        superseded.unlink(missing_ok=True)
+    # Prune by date, counting compressed and older uncompressed backups alike, so a backup's
+    # -wal/-shm files go with it and a stray sidecar cannot displace a real backup.
     prefix = len('hearth-0000-00-00')
-    keep = set(sorted(name[:prefix] for file in folder.glob('hearth-????-??-??.sqlite3')
-                      for name in [file.name])[-7:])
+    dates = {file.name[:prefix] for pattern in ('hearth-????-??-??.sqlite3', 'hearth-????-??-??.sqlite3.gz')
+             for file in folder.glob(pattern)}
+    keep = set(sorted(dates)[-7:])
     for old in folder.glob('hearth-????-??-??.sqlite3*'):
         if old.name[:prefix] not in keep:
             old.unlink(missing_ok=True)

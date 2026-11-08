@@ -40,7 +40,7 @@ hydrateIcons();
 const state = {devices:[], firmware:[], firmware_events:[], collector:{network:{}}, events:[], samples:[], page:'overview', filter:'all', query:'', range:24, metric:'latency_ms', connected:false, initial:true, unit:localStorage.getItem('hearth-unit') || 'F', chartDevices:new Set(), lastHistory:null, historyError:null};
 const colors = ['#2e6a51','#9eac58','#d09460','#7895b0','#9b86ae','#c17e85','#528f90','#b5a384']
  .map((color, i) => `var(--chart-series-${i+1}, ${color})`);
-let loading = false, toastTimer, detailIP = null;
+let loading = false, toastTimer, detailDeviceId = null;
 const openDeviceCards = new Set();
 const deviceFilters = [
  ['all','All devices'], ['saved','My devices'], ['switch','Switches'], ['sensor','Sensors'],
@@ -65,6 +65,8 @@ const firmwareGuides = {
   steps:'To check for speaker updates, open RIVA Voice (iOS) or Riva Audio (Android) on the same Wi-Fi network. Select your Festival, open its settings, and look for Update Firmware at the bottom. The version shown here is the speaker’s Cast build.'},
  myq: {label:'myQ device settings guide', url:'https://support.chamberlaingroup.com/s/article/myQ-app-Navigating-to-Device-Settings',
   steps:'In the myQ app, open Settings or Menu → Devices. Under Hubs, choose your opener or hub, then select the paired opener if shown. Look for the firmware version in Device Settings.'},
+ liftmaster98022: {label:'LiftMaster 98022 owner’s manual', url:'https://support.chamberlaingroup.com/s/article/LiftMaster-Models-98022-and-98002-VKP1-Quick-Start-Guide-English-French-Spanish',
+  steps:'On the 98022’s Smart Control Panel, hold LIGHT and press the second navigation button. Read the software version in the Service menu. See page 28 of the owner’s manual.'},
 };
 const timeAgo = (value) => { if (!value) return 'Not yet'; const s = Math.max(0, (Date.now()-Date.parse(value))/1000); return s<15?'Just now':s<60?`${Math.floor(s)}s ago`:s<3600?`${Math.floor(s/60)}m ago`:s<86400?`${Math.floor(s/3600)}h ago`:`${Math.floor(s/86400)}d ago`; };
 const dateTime = value => value ? new Date(value).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) : 'Not yet';
@@ -75,6 +77,7 @@ const firmwareUpdateCount = () => state.firmware.filter(d=>d.stable_status==='up
 const reachable = () => state.devices.filter(d=>['online','reachable','auth_required'].includes(d.status));
 const metricFormat = (m) => { if (!m) return '—'; if(typeof m.value==='string')return esc(m.value);if(m.kind==='boolean')return m.value?'Yes':'No';if(m.unit==='s'&&m.label?.startsWith('Track')){const seconds=Math.round(m.value);return `${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,'0')}`;} if (m.unit==='°C' && state.unit==='F') return `${fmt(m.value*9/5+32)} °F`; if (m.unit==='s') { const h=m.value/3600; return h<24?`${fmt(h)} hours`:`${fmt(h/24)} days`; } return `${fmt(m.value, m.unit==='kWh'?4:1)} ${esc(m.unit)}`; };
 function statusInfo(d) {
+ if(!d.ip) return ['No current address','offline'];
  if(d.status==='online') return ['Reporting','online'];
  if(d.status==='reachable') return ['Reachable','reachable'];
  if(d.status==='auth_required') return ['Auth required','attention'];
@@ -172,7 +175,7 @@ function mediaOverview() {
  const devices=reporting().filter(d=>d.kind==='media');
  if(!devices.length)return '';
  const visible=[...devices].sort((a,b)=>(a.metrics?.playback_state?.value==='Playing'?-1:0)-(b.metrics?.playback_state?.value==='Playing'?-1:0)||a.name.localeCompare(b.name)).slice(0,6);
- return `<section class="panel media-overview"><div class="panel-heading"><div><h2>Media devices</h2><p>Live status from ${devices.length} ${devices.length===1?'media device':'media devices'}.</p></div><a href="#devices/media" class="text-button">View all media ${icon('arrow')}</a></div><div class="table-scroll"><table><thead><tr><th>Device</th><th>Reported state</th><th>Reported level</th><th>App / details</th></tr></thead><tbody>${visible.map(d=>{const m=d.metrics||{},activity=mediaState(d);return `<tr><td><button class="table-device" data-device="${esc(d.ip)}">${icon(deviceIcon(d))}<span><strong>${esc(d.name)}</strong><small>${esc(deviceModel(d))}</small></span></button></td><td>${esc(activity.value)}<small class="media-state-label">${esc(activity.label)}</small></td><td>${mediaLevel(d)}</td><td class="muted">${esc(m.media_title?.value||m.active_app?.value||m.speaker_room?.value||protocolLabel(d.protocol))}</td></tr>`;}).join('')}</tbody></table></div></section>`;
+ return `<section class="panel media-overview"><div class="panel-heading"><div><h2>Media devices</h2><p>Live status from ${devices.length} ${devices.length===1?'media device':'media devices'}.</p></div><a href="#devices/media" class="text-button">View all media ${icon('arrow')}</a></div><div class="table-scroll"><table><thead><tr><th>Device</th><th>Reported state</th><th>Reported level</th><th>App / details</th></tr></thead><tbody>${visible.map(d=>{const m=d.metrics||{},activity=mediaState(d);return `<tr><td><button class="table-device" data-device="${d.device_id}">${icon(deviceIcon(d))}<span><strong>${esc(d.name)}</strong><small>${esc(deviceModel(d))}</small></span></button></td><td>${esc(activity.value)}<small class="media-state-label">${esc(activity.label)}</small></td><td>${mediaLevel(d)}</td><td class="muted">${esc(m.media_title?.value||m.active_app?.value||m.speaker_room?.value||protocolLabel(d.protocol))}</td></tr>`;}).join('')}</tbody></table></div></section>`;
 }
 function chartPanel() {
  const options=new Map([['latency_ms','Network latency'],['rssi_dbm','Wi-Fi signal'],['uptime_s','Uptime'],['power_w','Power'],['internal_temperature_c','Internal temperature'],['temperature_c','Sensor temperature'],['humidity_pct','Humidity'],['volume_pct','Volume'],['component_volume_pct','Component level']]);
@@ -182,17 +185,17 @@ function chartPanel() {
 }
 function seriesData() {
  const grouped=new Map();
- for(const sample of state.samples) if(sample.metric===state.metric) { if(!grouped.has(sample.ip)) grouped.set(sample.ip,[]); grouped.get(sample.ip).push(sample); }
- return state.devices.filter(d=>grouped.has(d.ip)).map((d,i)=>({device:d, points:grouped.get(d.ip), color:colors[i%colors.length]}));
+ for(const sample of state.samples) if(sample.metric===state.metric) { if(!grouped.has(sample.device_id)) grouped.set(sample.device_id,[]); grouped.get(sample.device_id).push(sample); }
+ return state.devices.filter(d=>grouped.has(d.device_id)).map((d,i)=>({device:d, points:grouped.get(d.device_id), color:colors[i%colors.length]}));
 }
 function chartLegend() {
  const series=seriesData();
- return series.length?series.map(s=>`<button class="legend-item ${state.chartDevices.has(s.device.ip)?'dimmed':''}" data-series="${esc(s.device.ip)}" aria-pressed="${!state.chartDevices.has(s.device.ip)}"><i class="legend-dot" data-color="${s.color}"></i>${esc(s.device.name)}<strong>${metricFormat(s.points.at(-1))}</strong></button>`).join(''):'';
+ return series.length?series.map(s=>`<button class="legend-item ${state.chartDevices.has(s.device.device_id)?'dimmed':''}" data-series="${s.device.device_id}" aria-pressed="${!state.chartDevices.has(s.device.device_id)}"><i class="legend-dot" data-color="${s.color}"></i>${esc(s.device.name)}<strong>${metricFormat(s.points.at(-1))}</strong></button>`).join(''):'';
 }
 function buildChart(metricLabel) {
  if(!state.lastHistory&&!state.historyError) return `<div class="chart-empty">${icon('clock')}<strong>Loading history…</strong></div>`;
  if(state.historyError) return `<div class="chart-empty">${icon('info')}<strong>History couldn’t load</strong><p>${esc(state.historyError)}</p></div>`;
- const series=seriesData().filter(s=>!state.chartDevices.has(s.device.ip));
+ const series=seriesData().filter(s=>!state.chartDevices.has(s.device.device_id));
  const all=series.flatMap(s=>s.points);
  if(!all.length) return `<div class="chart-empty">${icon('chart')}<strong>${state.chartDevices.size?'No visible readings':'No readings for this metric'}</strong><p>${state.chartDevices.size?'Select a device in the legend to show its readings.':'Readings will appear as compatible devices report this metric.'}</p></div>`;
  const compact=window.matchMedia('(max-width: 530px)').matches;
@@ -245,12 +248,12 @@ function deviceRecency(device) {
 }
 function deviceCard(d) {
  const [,cls]=statusInfo(d);
- return `<button class="device-card ${cls}" data-device="${esc(d.ip)}">
+ return `<button class="device-card ${cls}" data-device="${d.device_id}">
   <div class="device-card-top"><span class="device-type-icon ${d.kind==='switch'?'sage':''}">${icon(deviceIcon(d))}</span>${badge(d)}</div>
   <div class="device-card-title"><h3 title="${esc(d.name)}">${esc(d.name)}</h3>${icon('chevron')}</div>
   <div class="device-meta">${esc(d.room)} <span>·</span> ${esc(deviceModel(d))}</div>
   ${deviceReadout(d)}
-  <div class="device-ip">${esc(d.ip)}<span>${deviceRecency(d)}</span></div>
+  <div class="device-ip">${esc(d.ip||"—")}<span>${deviceRecency(d)}</span></div>
  </button>`;
 }
 function activityPanel(full=false, firmwareOnly=false) {
@@ -263,6 +266,8 @@ function activityPanel(full=false, firmwareOnly=false) {
 }
 function manualFirmwareGuide(device) {
  const names=[device.model, device.advertised_model, device.hostname, device.discovered_name, device.name];
+ const liftmaster98022=/(?:^|[^a-z0-9])98022(?:mc)?(?=$|[^a-z0-9])/i;
+ if(names.some(name=>liftmaster98022.test(name||'')))return firmwareGuides.liftmaster98022;
  const myqName=/(?:^|[^a-z0-9])(?:lift[ _-]?master|my[ _-]?q)(?=$|[^a-z0-9])/i;
  return names.some(name=>myqName.test(name||'')) ? firmwareGuides.myq : null;
 }
@@ -330,9 +335,9 @@ function firmwareDetails(finding, device) {
 }
 function inventoryCard(device, finding) {
  const firmware = firmwareBadge(firmwareStatus(finding,device));
- return `<details class="panel inventory-card" data-inventory-ip="${esc(device.ip)}" ${openDeviceCards.has(device.ip)?'open':''}>
+ return `<details class="panel inventory-card" data-inventory-id="${device.device_id}" ${openDeviceCards.has(device.device_id)?'open':''}>
   <summary class="inventory-card-heading">
-   <span class="inventory-identity"><strong>${esc(device.name)}</strong><span class="mono muted">${esc(device.ip)}</span></span>
+   <span class="inventory-identity"><strong>${esc(device.name)}</strong><span class="mono muted">${esc(device.ip||"—")}</span></span>
    <span class="inventory-statuses">${badge(device)}${firmware}</span>
    ${icon('down','inventory-chevron')}
   </summary>
@@ -341,7 +346,7 @@ function inventoryCard(device, finding) {
    ${deviceReadout(device)}
    <p class="muted inventory-recency">${deviceRecency(device)}</p>
    ${firmwareDetails(finding,device)}
-   <button type="button" class="text-button" data-device="${esc(device.ip)}">Device details ${icon('arrow')}</button>
+   <button type="button" class="text-button" data-device="${device.device_id}">Device details ${icon('arrow')}</button>
   </div>
  </details>`;
 }
@@ -431,11 +436,13 @@ function routerMonitoring() {
 }
 function networkPage() {
  const net=state.collector.network;
- return `${heading('Network', 'Discover devices and check how they connect to the collector.',true,'LOCAL NETWORK')}${connectionBanner()}${scanBanner()}<section class="network-info-grid">${statCard('Local subnet',esc(net.subnet||'Unknown'),'Discovery limited to this /24 network','network')}${statCard('Gateway',esc(net.gateway||'Unknown'),'Default route for this network','wifi')}${statCard('Collector IP',esc(net.local_ip||'Unknown'),`${esc(net.interface||'Local network address')}`,'server')}</section>${routerMonitoring()}<section class="panel"><div class="panel-heading"><div><h2>Network inventory</h2><p>${state.devices.length} devices saved · Last scan ${timeAgo(state.collector.last_scan)} · Names ${timeAgo(state.collector.last_name_discovery)}</p></div><div class="network-actions"><button class="text-button names-button" ${state.collector.naming?'disabled':''}>${icon('search')}${state.collector.naming?'Finding names…':'Refresh names'}</button><button class="text-button scan-button" ${state.collector.scanning?'disabled':''}>${icon('scan')}Scan again</button></div></div><div class="table-scroll"><table><thead><tr><th>Device</th><th>IP address</th><th>Hardware address</th><th>Connection</th><th>Telemetry API</th><th>Last seen</th><th></th></tr></thead><tbody>${state.devices.map(d=>`<tr><td><button class="table-device" data-device="${esc(d.ip)}">${icon(deviceIcon(d))}<span><strong>${esc(d.name)}</strong><small>${esc(deviceModel(d))}</small></span></button></td><td class="mono">${esc(d.ip)}</td><td class="mono muted">${esc(d.mac||'Not observed')}</td><td>${badge(d)}</td><td><span class="protocol-tag ${d.status==='online'?'supported':''}">${esc(protocolLabel(d.protocol))}</span></td><td class="muted">${timeAgo(d.last_seen)}</td><td><button class="icon-button" data-device="${esc(d.ip)}" aria-label="View ${esc(d.name)}">${icon('chevron')}</button></td></tr>`).join('')}</tbody></table></div></section><div class="notice lower-notice">${icon('shield')}Discovery uses ping, the local ARP cache, and read-only Shelly requests. A cached address alone is never marked online.</div>`;
+ return `${heading('Network', 'Discover devices and check how they connect to the collector.',true,'LOCAL NETWORK')}${connectionBanner()}${scanBanner()}<section class="network-info-grid">${statCard('Local subnet',esc(net.subnet||'Unknown'),'Discovery limited to this /24 network','network')}${statCard('Gateway',esc(net.gateway||'Unknown'),'Default route for this network','wifi')}${statCard('Collector IP',esc(net.local_ip||'Unknown'),`${esc(net.interface||'Local network address')}`,'server')}</section>${routerMonitoring()}<section class="panel"><div class="panel-heading"><div><h2>Network inventory</h2><p>${state.devices.length} devices saved · Last scan ${timeAgo(state.collector.last_scan)} · Names ${timeAgo(state.collector.last_name_discovery)}</p></div><div class="network-actions"><button class="text-button names-button" ${state.collector.naming?'disabled':''}>${icon('search')}${state.collector.naming?'Finding names…':'Refresh names'}</button><button class="text-button scan-button" ${state.collector.scanning?'disabled':''}>${icon('scan')}Scan again</button></div></div><div class="table-scroll"><table><thead><tr><th>Device</th><th>IP address</th><th>Hardware address</th><th>Connection</th><th>Telemetry API</th><th>Last seen</th><th></th></tr></thead><tbody>${state.devices.map(d=>`<tr><td><button class="table-device" data-device="${d.device_id}">${icon(deviceIcon(d))}<span><strong>${esc(d.name)}</strong><small>${esc(deviceModel(d))}</small></span></button></td><td class="mono">${esc(d.ip||"—")}</td><td class="mono muted">${esc(d.mac||'Not observed')}</td><td>${badge(d)}</td><td><span class="protocol-tag ${d.status==='online'?'supported':''}">${esc(protocolLabel(d.protocol))}</span></td><td class="muted">${timeAgo(d.last_seen)}</td><td><button class="icon-button" data-device="${d.device_id}" aria-label="View ${esc(d.name)}">${icon('chevron')}</button></td></tr>`).join('')}</tbody></table></div></section><div class="notice lower-notice">${icon('shield')}Discovery uses ping, the local ARP cache, and read-only Shelly requests. A cached address alone is never marked online.</div>`;
 }
 function settingsPage() {
  const c=state.collector;
  const codeSource={checkout:'Working checkout',installed:'Installed snapshot'}[c.code_source];
+ const days=c.retention_days||30, dayLabel=n=>`${n} ${n===1?'day':'days'}`;
+ const retention=`<label class="select-wrap">${icon('clock')}<select id="retention-select" aria-label="History retention">${Array.from({length:30},(_,i)=>i+1).map(n=>`<option value="${n}" ${n===days?'selected':''}>${dayLabel(n)}</option>`).join('')}</select>${icon('down')}</label>`;
  const theme=document.documentElement.dataset.theme;
  const themeChoice=`<div class="setting-choice">
   <div><strong id="theme-label">Theme</strong><p>Changes the dashboard appearance.</p></div>
@@ -446,22 +453,22 @@ function settingsPage() {
    }).join('')}
   </div>
  </div>`;
- return `${heading('Settings', 'Manage display preferences and check the collector.',false,'WORKSPACE SETTINGS')}<div class="settings-layout"><section class="panel settings-panel"><div class="panel-heading"><div><h2>Your local collector</h2><p>Collection and storage on the collector computer.</p></div><span class="status-badge ${state.connected?'online':'offline'}"><i class="dot"></i>${state.connected?'Running':'Disconnected'}</span></div><dl class="settings-list"><div><dt>Collection interval</dt><dd>Every ${c.poll_seconds||30} seconds</dd></div><div><dt>History retention</dt><dd>${c.retention_days||30} days</dd></div><div><dt>Data storage</dt><dd>Local SQLite database</dd></div>${codeSource?`<div><dt>Code source</dt><dd>${codeSource}</dd></div>`:''}<div><dt>Started</dt><dd>${dateTime(c.started_at)}</dd></div><div><dt>Last collection</dt><dd>${dateTime(c.last_poll)}</dd></div><div><dt>Device access</dt><dd>Read-only telemetry</dd></div></dl><div class="notice">${icon('info')}${c.background?'Background collection starts at login and recovers after failures.':'Keep the server running to collect readings.'} The collector computer must be awake. Closing the browser doesn’t stop collection.</div></section><section class="panel settings-panel"><div class="panel-heading"><div><h2>Preferences</h2><p>Preferences for this browser.</p></div>${icon('settings')}</div>${themeChoice}<div class="setting-choice"><div><strong>Temperature unit</strong><p>Applies to charts and device readings.</p></div><div class="segmented">${['F','C'].map(u=>`<button class="${state.unit===u?'selected':''}" data-unit="${u}" aria-pressed="${state.unit===u}">°${u}</button>`).join('')}</div></div><div class="setting-choice export-setting"><div><strong>Export history</strong><p>Export all readings from the past 30 days.</p></div><a href="/api/export.csv?hours=720" class="button secondary">${icon('download')}Export CSV</a></div><div class="supported-apis"><h3>Connected locally</h3><div><span class="api-logo">S</span><span><strong>Shelly Gen 1 & Gen 2+</strong><small>Power, sensors, relays, signal & uptime when exposed</small></span>${icon('check')}</div><p class="muted">Local readers also support Roku, Sonos, WiiM UPnP, and Google Cast receivers, including RIVA. Other paired or cloud-managed devices need their own integration. Authentication-protected APIs are flagged for setup.</p></div></section></div>${collectionStatusPanel()}${activityPanel(true)}`;
+ return `${heading('Settings', 'Manage display preferences and check the collector.',false,'WORKSPACE SETTINGS')}<div class="settings-layout"><section class="panel settings-panel"><div class="panel-heading"><div><h2>Your local collector</h2><p>Collection and storage on the collector computer.</p></div><span class="status-badge ${state.connected?'online':'offline'}"><i class="dot"></i>${state.connected?'Running':'Disconnected'}</span></div><dl class="settings-list"><div><dt>Collection interval</dt><dd>Every ${c.poll_seconds||30} seconds</dd></div><div><dt>History retention</dt><dd>${retention}</dd></div><div><dt>Data storage</dt><dd>Local SQLite database</dd></div>${codeSource?`<div><dt>Code source</dt><dd>${codeSource}</dd></div>`:''}<div><dt>Started</dt><dd>${dateTime(c.started_at)}</dd></div><div><dt>Last collection</dt><dd>${dateTime(c.last_poll)}</dd></div><div><dt>Device access</dt><dd>Read-only telemetry</dd></div></dl><div class="notice">${icon('info')}${c.background?'Background collection starts at login and recovers after failures.':'Keep the server running to collect readings.'} The collector computer must be awake. Closing the browser doesn’t stop collection.</div></section><section class="panel settings-panel"><div class="panel-heading"><div><h2>Preferences</h2><p>Preferences for this browser.</p></div>${icon('settings')}</div>${themeChoice}<div class="setting-choice"><div><strong>Temperature unit</strong><p>Applies to charts and device readings.</p></div><div class="segmented">${['F','C'].map(u=>`<button class="${state.unit===u?'selected':''}" data-unit="${u}" aria-pressed="${state.unit===u}">°${u}</button>`).join('')}</div></div><div class="setting-choice export-setting"><div><strong>Export history</strong><p>Export all readings from the past ${dayLabel(days)}.</p></div><a href="/api/export.csv?hours=${days*24}" class="button secondary">${icon('download')}Export CSV</a></div><div class="supported-apis"><h3>Connected locally</h3><div><span class="api-logo">S</span><span><strong>Shelly Gen 1 & Gen 2+</strong><small>Power, sensors, relays, signal & uptime when exposed</small></span>${icon('check')}</div><p class="muted">Local readers also support Roku, Sonos, WiiM UPnP, and Google Cast receivers, including RIVA. Other paired or cloud-managed devices need their own integration. Authentication-protected APIs are flagged for setup.</p></div></section></div>${collectionStatusPanel()}${activityPanel(true)}`;
 }
 const views={overview,devices:devicesPage,history:historyPage,network:networkPage,settings:settingsPage};
 function render() {
  const main=$('#main'), focused=document.activeElement, focusID=focused?.id, selection=focused?.selectionStart;
- const cardSelector='details[data-inventory-ip]';
- const cardIP=focused?.closest(cardSelector)?.dataset.inventoryIp;
+ const cardSelector='details[data-inventory-id]';
+ const cardId=focused?.closest(cardSelector)?.dataset.inventoryId;
  // Keep disclosure state and focus when polling replaces the inventory.
  for(const card of $$(cardSelector,main)) {
-  const ip=card.dataset.inventoryIp;
-  if(card.open)openDeviceCards.add(ip);
-  else openDeviceCards.delete(ip);
+  const deviceId=Number(card.dataset.inventoryId);
+  if(card.open)openDeviceCards.add(deviceId);
+  else openDeviceCards.delete(deviceId);
  }
  main.innerHTML=views[state.page]();
  $$('[data-color]',main).forEach(el=>{el.style.backgroundColor=el.dataset.color;});
- const card=cardIP && $$(cardSelector,main).find(el=>el.dataset.inventoryIp===cardIP);
+ const card=cardId && $$(cardSelector,main).find(el=>el.dataset.inventoryId===cardId);
  if(card) {
   const control=$(focused.tagName.toLowerCase(),card)||$('summary',card);
   control.focus({preventScroll:true});
@@ -485,12 +492,12 @@ function route() {
  if(!state.initial&&(state.page==='history'||state.page==='devices'))load();
 }
 function openAdd() { $('#add-form').reset();$('#add-error').textContent='';$('#device-dialog').showModal(); }
-function openDetail(ip) {
- const d=state.devices.find(d=>d.ip===ip);if(!d)return;detailIP=ip;
- const finding=state.firmware.find(row=>row.ip===ip);
+function openDetail(deviceId) {
+ const d=state.devices.find(d=>d.device_id===deviceId);if(!d)return;detailDeviceId=deviceId;
+ const finding=state.firmware.find(row=>row.ip===d.ip);
  const entries=Object.entries(d.metrics||{}).filter(([k])=>!/^power_\d+_w$/.test(k));
  const lastEntries=d.status!=='online'?Object.entries(d.last_metrics||{}).filter(([k])=>!/^power_\d+_w$/.test(k)&&k!=='latency_ms'):[];
- $('#detail-content').innerHTML=`<div class="modal-heading"><div class="detail-header"><span class="device-type-icon sage">${icon(deviceIcon(d))}</span><div><span class="eyebrow">${esc(d.model||d.advertised_model||(d.discovered_name?'NETWORK DEVICE':'UNIDENTIFIED DEVICE'))}</span><h2 id="detail-title">${esc(d.name)}</h2></div></div><button class="icon-button close-detail" aria-label="Close device details">${icon('close')}</button></div><div class="detail-status">${badge(d)}<span class="mono muted">${esc(d.ip)}</span>${firmwareSummaryBadge(finding,d)}</div>${d.discovered_name?`<div class="discovered-identity"><div>${icon('wifi')}<strong>Discovered identity</strong><span>${esc(d.discovered_name_source)}</span></div><p>${esc(d.discovered_name)}</p>${d.hostname?`<small class="mono">${esc(d.hostname)}</small>`:''}<small>Observed ${timeAgo(d.name_discovered_at)}${d.name_mode==='manual'?' · Custom display name preserved':' · Used as the display name'}</small></div>`:''}${d.error?`<div class="notice warning">${icon('info')}${esc(d.error)}</div>`:''}${d.telemetry_note?`<div class="notice">${icon('info')}${esc(d.telemetry_note)}</div>`:''}<div class="detail-metrics">${entries.map(([k,m])=>`<div><span>${esc(m.label)}</span><strong>${k.startsWith('relay_')?m.value?'On':'Off':metricFormat(m)}</strong></div>`).join('')||'<div><span>Telemetry</span><strong>No readings yet</strong></div>'}</div>${lastEntries.length?`<details class="last-readings"><summary>Last successful telemetry · ${dateTime(d.last_telemetry)}</summary><p class="muted">Historical readings, not current device state.</p><div class="detail-metrics stale">${lastEntries.map(([k,m])=>`<div><span>${esc(m.label)}</span><strong>${metricFormat(m)}</strong></div>`).join('')}</div></details>`:''}<dl class="device-info-list"><div><dt>Last seen on network</dt><dd>${dateTime(d.last_seen)}</dd></div><div><dt>Last successful telemetry</dt><dd>${dateTime(d.last_telemetry)}</dd></div><div><dt>MAC address</dt><dd class="mono">${esc(d.mac||'Not observed')}</dd></div></dl>${firmwareDetails(finding,d)}${Object.keys(d.metrics||{}).some(k=>k.includes('internal_temperature'))?`<div class="notice">${icon('temp')}Internal device temperature is not the room temperature.</div>`:''}<form id="edit-form"><div class="detail-edit-heading"><h3>Make it yours</h3><span>Workspace labels only</span></div><div class="form-row"><label>Device name<input name="name" value="${esc(d.name)}" maxlength="100" required></label><label>Room<input name="room" value="${esc(d.room)}" maxlength="100" required></label></div><label>Notes<textarea name="notes" rows="2" maxlength="1000">${esc(d.notes)}</textarea></label><div class="detail-checks"><label class="check-label"><input name="auto_name" type="checkbox" ${d.name_mode==='auto'?'checked':''}>Use discovered name when available</label><label class="check-label"><input name="pinned" type="checkbox" ${d.pinned?'checked':''}>Show in My devices</label><label class="check-label"><input name="expected_sleep" type="checkbox" ${d.expected_sleep?'checked':''}>Battery device that sleeps</label></div><p id="edit-error" class="form-error" role="alert"></p><div class="detail-actions"><a class="button secondary" href="/api/export.csv?hours=${state.range}&ip=${esc(d.ip)}">${icon('download')}Export history</a><button class="button primary" type="submit">${icon('check')}Save details</button></div></form>${d.raw_status?`<details class="raw-details"><summary>Last API snapshot <span>${dateTime(d.raw_status_at||d.last_telemetry)}</span></summary><pre>${esc(JSON.stringify(d.raw_status,null,2))}</pre></details>`:''}`;
+ $('#detail-content').innerHTML=`<div class="modal-heading"><div class="detail-header"><span class="device-type-icon sage">${icon(deviceIcon(d))}</span><div><span class="eyebrow">${esc(d.model||d.advertised_model||(d.discovered_name?'NETWORK DEVICE':'UNIDENTIFIED DEVICE'))}</span><h2 id="detail-title">${esc(d.name)}</h2></div></div><button class="icon-button close-detail" aria-label="Close device details">${icon('close')}</button></div><div class="detail-status">${badge(d)}<span class="mono muted">${esc(d.ip||"—")}</span>${firmwareSummaryBadge(finding,d)}</div>${d.discovered_name?`<div class="discovered-identity"><div>${icon('wifi')}<strong>Discovered identity</strong><span>${esc(d.discovered_name_source)}</span></div><p>${esc(d.discovered_name)}</p>${d.hostname?`<small class="mono">${esc(d.hostname)}</small>`:''}<small>Observed ${timeAgo(d.name_discovered_at)}${d.name_mode==='manual'?' · Custom display name preserved':' · Used as the display name'}</small></div>`:''}${d.error?`<div class="notice warning">${icon('info')}${esc(d.error)}</div>`:''}${d.telemetry_note?`<div class="notice">${icon('info')}${esc(d.telemetry_note)}</div>`:''}<div class="detail-metrics">${entries.map(([k,m])=>`<div><span>${esc(m.label)}</span><strong>${k.startsWith('relay_')?m.value?'On':'Off':metricFormat(m)}</strong></div>`).join('')||'<div><span>Telemetry</span><strong>No readings yet</strong></div>'}</div>${lastEntries.length?`<details class="last-readings"><summary>Last successful telemetry · ${dateTime(d.last_telemetry)}</summary><p class="muted">Historical readings, not current device state.</p><div class="detail-metrics stale">${lastEntries.map(([k,m])=>`<div><span>${esc(m.label)}</span><strong>${metricFormat(m)}</strong></div>`).join('')}</div></details>`:''}<dl class="device-info-list"><div><dt>Last seen on network</dt><dd>${dateTime(d.last_seen)}</dd></div><div><dt>Last successful telemetry</dt><dd>${dateTime(d.last_telemetry)}</dd></div><div><dt>MAC address</dt><dd class="mono">${esc(d.mac||'Not observed')}</dd></div></dl>${firmwareDetails(finding,d)}${Object.keys(d.metrics||{}).some(k=>k.includes('internal_temperature'))?`<div class="notice">${icon('temp')}Internal device temperature is not the room temperature.</div>`:''}<form id="edit-form"><div class="detail-edit-heading"><h3>Make it yours</h3><span>Workspace labels only</span></div><div class="form-row"><label>Device name<input name="name" value="${esc(d.name)}" maxlength="100" required></label><label>Room<input name="room" value="${esc(d.room)}" maxlength="100" required></label></div><label>Notes<textarea name="notes" rows="2" maxlength="1000">${esc(d.notes)}</textarea></label><div class="detail-checks"><label class="check-label"><input name="auto_name" type="checkbox" ${d.name_mode==='auto'?'checked':''}>Use discovered name when available</label><label class="check-label"><input name="pinned" type="checkbox" ${d.pinned?'checked':''}>Show in My devices</label><label class="check-label"><input name="expected_sleep" type="checkbox" ${d.expected_sleep?'checked':''}>Battery device that sleeps</label></div><p id="edit-error" class="form-error" role="alert"></p><div class="detail-actions"><a class="button secondary" href="/api/export.csv?hours=${state.range}&device_id=${d.device_id}">${icon('download')}Export history</a><button class="button primary" type="submit">${icon('check')}Save details</button></div></form>${d.raw_status?`<details class="raw-details"><summary>Last API snapshot <span>${dateTime(d.raw_status_at||d.last_telemetry)}</span></summary><pre>${esc(JSON.stringify(d.raw_status,null,2))}</pre></details>`:''}`;
  if(!$('#detail-dialog').open)$('#detail-dialog').showModal();
 }
 async function scan() {
@@ -501,12 +508,12 @@ document.addEventListener('click',async e=>{
  if(target.matches('.add-button'))openAdd();
  if(target.id==='close-add')$('#device-dialog').close();
  if(target.matches('.close-detail'))$('#detail-dialog').close();
- if(target.dataset.device)openDetail(target.dataset.device);
+ if(target.dataset.device)openDetail(Number(target.dataset.device));
  if(target.matches('.scan-button'))await scan();
  if(target.matches('.names-button')){try{await api('/api/names/refresh',{method:'POST',body:'{}'});toast('Looking for advertised device names…');await load();}catch(err){toast(err.message,true);}}
  if(target.id==='refresh-button'||target.id==='retry-load') {try{await api('/api/refresh',{method:'POST',body:'{}'});toast('Refreshing device readings…');await load();}catch(err){toast(err.message,true);}}
  if(target.dataset.range){state.range=Number(target.dataset.range);await loadHistory();render();}
- if(target.dataset.series){state.chartDevices.has(target.dataset.series)?state.chartDevices.delete(target.dataset.series):state.chartDevices.add(target.dataset.series);render();}
+ if(target.dataset.series){const id=Number(target.dataset.series);state.chartDevices.has(id)?state.chartDevices.delete(id):state.chartDevices.add(id);render();}
  if(target.dataset.unit){state.unit=target.dataset.unit;localStorage.setItem('hearth-unit',state.unit);render();}
  if(target.dataset.theme){
   applyTheme(target.dataset.theme);
@@ -514,7 +521,7 @@ document.addEventListener('click',async e=>{
   render();
  }
 });
-document.addEventListener('change',e=>{if(e.target.name==='auto_name'&&e.target.checked){const d=state.devices.find(d=>d.ip===detailIP);$('#edit-form input[name="name"]').value=d.discovered_name||`Device .${detailIP.split('.').at(-1)}`;}if(e.target.id==='metric-select'){state.metric=e.target.value;state.chartDevices.clear();render();}});
+document.addEventListener('change',e=>{if(e.target.name==='auto_name'&&e.target.checked){const d=state.devices.find(d=>d.device_id===detailDeviceId);if(d)$('#edit-form input[name="name"]').value=d.discovered_name||(d.ip?`Device .${d.ip.split('.').at(-1)}`:d.name);}if(e.target.id==='metric-select'){state.metric=e.target.value;state.chartDevices.clear();render();}if(e.target.id==='retention-select'){const days=Number(e.target.value),current=state.collector.retention_days||30,label=`${days} ${days===1?'day':'days'}`;if(days<current&&!confirm(`Delete readings older than ${label}? This can’t be undone.`)){e.target.value=current;return;}api('/api/settings/retention',{method:'POST',body:JSON.stringify({days})}).then(()=>{toast(`History is kept for ${label}.`);load();}).catch(err=>{e.target.value=current;toast(err.message,true);});}});
 document.addEventListener('input',e=>{if(e.target.name==='name'&&e.target.closest('#edit-form'))$('#edit-form input[name="auto_name"]').checked=false;if(e.target.id==='device-search'){state.query=e.target.value;render();}});
 $('#add-form').addEventListener('submit',async e=>{
  e.preventDefault();const form=e.target,button=$('button[type="submit"]',form);button.disabled=true;$('#add-error').textContent='';
@@ -522,7 +529,7 @@ $('#add-form').addEventListener('submit',async e=>{
 });
 document.addEventListener('submit',async e=>{
  if(e.target.id!=='edit-form')return;e.preventDefault();const form=e.target,fields=new FormData(form),button=$('button[type="submit"]',form);button.disabled=true;
- try{await api(`/api/devices/${detailIP}`,{method:'PATCH',body:JSON.stringify({name:fields.get('name'),name_mode:fields.has('auto_name')?'auto':'manual',room:fields.get('room'),notes:fields.get('notes'),pinned:fields.has('pinned'),expected_sleep:fields.has('expected_sleep')})});$('#detail-dialog').close();toast('Device details saved.');await load();}catch(err){$('#edit-error').textContent=err.message;button.disabled=false;}
+ try{await api(`/api/devices/${detailDeviceId}`,{method:'PATCH',body:JSON.stringify({name:fields.get('name'),name_mode:fields.has('auto_name')?'auto':'manual',room:fields.get('room'),notes:fields.get('notes'),pinned:fields.has('pinned'),expected_sleep:fields.has('expected_sleep')})});$('#detail-dialog').close();toast('Device details saved.');await load();}catch(err){$('#edit-error').textContent=err.message;button.disabled=false;}
 });
 $$('dialog').forEach(dialog=>dialog.addEventListener('click',e=>{if(e.target===dialog){const r=dialog.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)dialog.close();}}));
 window.addEventListener('hashchange',route);

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import concurrent.futures
 import csv
 from datetime import datetime, timezone
@@ -39,7 +40,7 @@ ROOT = Path(__file__).resolve().parent
 WEB_ASSETS = ('/index.html', '/app.js', '/theme.js', '/style.css', '/favicon.svg')
 DEV_RELOAD = os.environ.get('LOCAL_SIGNAL_DEV_RELOAD')
 POLL_SECONDS = 30
-RETENTION_DAYS = 30
+RETENTION_DAYS = 30  # Longest history the dashboard keeps; the chosen length is a setting.
 # Slow-changing readings are stored when they change, and at most this often when they do not.
 # The value history is lossless: an omitted row repeats the previous stored value.
 SAMPLE_HEARTBEAT_SECONDS = 600
@@ -69,6 +70,12 @@ def local_ip(value):
     if address.packed[-1] in (0, 255):
         raise ValueError('Use a device address, not a network or broadcast address.')
     return str(address)
+
+
+def inventory_id(value):
+    if not re.fullmatch(r'[0-9]{1,19}', value) or not 0 < int(value) <= 2**63 - 1:
+        raise ValueError('Invalid inventory device ID.')
+    return int(value)
 
 
 def number(value):
@@ -351,6 +358,13 @@ def probe_device(device):
 
 
 class Store:
+    DEVICE_TABLE = '''CREATE TABLE IF NOT EXISTS devices (
+        device_id INTEGER PRIMARY KEY AUTOINCREMENT, ip TEXT UNIQUE, hardware_id TEXT UNIQUE, address_checked_at TEXT,
+        name TEXT NOT NULL, room TEXT NOT NULL DEFAULT 'Unassigned', notes TEXT NOT NULL DEFAULT '',
+        pinned INTEGER NOT NULL DEFAULT 0, expected_sleep INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL, last_seen TEXT, last_telemetry TEXT, payload TEXT NOT NULL DEFAULT '{}',
+        name_mode TEXT NOT NULL DEFAULT 'manual')'''
+
     def __init__(self, path):
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -359,36 +373,28 @@ class Store:
         self.db = sqlite3.connect(path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.execute('PRAGMA journal_mode=WAL')
-        self.db.executescript('''
-          CREATE TABLE IF NOT EXISTS devices (ip TEXT PRIMARY KEY, name TEXT NOT NULL, room TEXT NOT NULL DEFAULT 'Unassigned',
-            notes TEXT NOT NULL DEFAULT '', pinned INTEGER NOT NULL DEFAULT 0, expected_sleep INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL, last_seen TEXT, last_telemetry TEXT, payload TEXT NOT NULL DEFAULT '{}');
+        self.db.executescript(self.DEVICE_TABLE + ''';
           CREATE TABLE IF NOT EXISTS samples (id INTEGER PRIMARY KEY, ip TEXT NOT NULL, at TEXT NOT NULL, metric TEXT NOT NULL,
-            value REAL NOT NULL, unit TEXT NOT NULL, label TEXT NOT NULL);
+            value REAL NOT NULL, unit TEXT NOT NULL, label TEXT NOT NULL, device_id INTEGER);
           CREATE INDEX IF NOT EXISTS samples_lookup ON samples(at, ip, metric);
           CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY, at TEXT NOT NULL, ip TEXT, type TEXT NOT NULL, message TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS firmware_alerts (device_id TEXT NOT NULL, channel TEXT NOT NULL,
             version TEXT NOT NULL, PRIMARY KEY(device_id, channel, version));
           CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
           CREATE TABLE IF NOT EXISTS text_samples (id INTEGER PRIMARY KEY, ip TEXT NOT NULL, at TEXT NOT NULL,
-            metric TEXT NOT NULL,value TEXT NOT NULL,unit TEXT NOT NULL,label TEXT NOT NULL);
+            metric TEXT NOT NULL,value TEXT NOT NULL,unit TEXT NOT NULL,label TEXT NOT NULL, device_id INTEGER);
           CREATE INDEX IF NOT EXISTS text_samples_lookup ON text_samples(at,ip,metric);
           CREATE TABLE IF NOT EXISTS energy_readings (source_id TEXT NOT NULL, at TEXT NOT NULL,
             counter_kwh REAL NOT NULL, uptime_s REAL, PRIMARY KEY(source_id,at));
         ''')
-        columns = {r['name'] for r in self.db.execute('PRAGMA table_info(devices)')}
-        if 'name_mode' not in columns:
-            self.db.execute("ALTER TABLE devices ADD COLUMN name_mode TEXT NOT NULL DEFAULT 'manual'")
-            for row in self.db.execute('SELECT ip,name FROM devices').fetchall():
-                if row['name'] in (f'Device .{row["ip"].split(".")[-1]}', f'Unidentified .{row["ip"].split(".")[-1]}'):
-                    self.db.execute("UPDATE devices SET name_mode='auto' WHERE ip=?", (row['ip'],))
+        self.migrate_device_identity()
         if not self.setting('energy_migrated'):
             # Existing samples predate hardware-keyed energy history. Import their
             # identified meter identity once; new readings carry identity at capture.
             self.db.execute('''INSERT OR IGNORE INTO energy_readings
               SELECT REPLACE(UPPER(json_extract(d.payload,'$.mac')),':',''),s.at,s.value,u.value
-              FROM samples s JOIN devices d ON d.ip=s.ip
-              LEFT JOIN samples u ON u.ip=s.ip AND u.at=s.at AND u.metric='uptime_s'
+              FROM samples s JOIN devices d ON d.device_id=s.device_id
+              LEFT JOIN samples u ON u.device_id=s.device_id AND u.at=s.at AND u.metric='uptime_s'
               WHERE s.metric='energy_kwh' AND s.value>=0
               AND LENGTH(REPLACE(json_extract(d.payload,'$.mac'),':',''))=12''')
             self.save_setting('energy_migrated', True)
@@ -399,9 +405,76 @@ class Store:
         # than the heartbeat would be stored again anyway, so only recent rows need loading.
         self.last_stored = {}
         warm = datetime.fromtimestamp(time.time() - SAMPLE_HEARTBEAT_SECONDS, timezone.utc).isoformat(timespec='seconds')
-        for row in self.db.execute('SELECT ip,metric,value,MAX(at) AS at FROM samples WHERE at>=? GROUP BY ip,metric', (warm,)):
+        for row in self.db.execute('''SELECT device_id,metric,value,MAX(at) AS at FROM samples
+                                   WHERE at>=? AND device_id IS NOT NULL GROUP BY device_id,metric''', (warm,)):
             if held_metric(row['metric']):
-                self.last_stored[(row['ip'], row['metric'])] = (row['value'], datetime.fromisoformat(row['at']).timestamp())
+                self.last_stored[(row['device_id'], row['metric'])] = (row['value'], datetime.fromisoformat(row['at']).timestamp())
+
+    def migrate_device_identity(self):
+        with self.db:
+            self.db.execute('BEGIN IMMEDIATE')
+            columns = {row['name'] for row in self.db.execute('PRAGMA table_info(devices)')}
+            if 'device_id' not in columns:
+                if 'name_mode' not in columns:
+                    self.db.execute("ALTER TABLE devices ADD COLUMN name_mode TEXT NOT NULL DEFAULT 'manual'")
+                    for row in self.db.execute('SELECT ip,name FROM devices').fetchall():
+                        suffix = row['ip'].rsplit('.', 1)[-1]
+                        if row['name'] in (f'Device .{suffix}', f'Unidentified .{suffix}'):
+                            self.db.execute("UPDATE devices SET name_mode='auto' WHERE ip=?", (row['ip'],))
+                self.db.execute('ALTER TABLE devices RENAME TO legacy_devices')
+                self.db.execute(self.DEVICE_TABLE)
+                fields = 'ip,name,room,notes,pinned,expected_sleep,created_at,last_seen,last_telemetry,payload,name_mode'
+                self.db.execute(f'INSERT INTO devices({fields}) SELECT {fields} FROM legacy_devices ORDER BY rowid')
+                self.db.execute('DROP TABLE legacy_devices')
+                # Older versions could save the same MAC at multiple IPs. Keep each
+                # record and its history, and use the latest observed record for future moves.
+                rows = self.db.execute("""SELECT device_id,payload,last_telemetry FROM devices
+                    ORDER BY MAX(COALESCE(json_extract(payload,'$.checked_at'), ''), COALESCE(last_telemetry, '')) DESC,
+                             last_seen DESC, device_id DESC""").fetchall()
+                for row in rows:
+                    payload = json.loads(row['payload'])
+                    mac = firmware_checks.mac_identity(payload.get('mac'))
+                    if mac:
+                        self.db.execute('UPDATE OR IGNORE devices SET hardware_id=?,address_checked_at=? WHERE device_id=?',
+                                        (mac, payload.get('checked_at') or row['last_telemetry'], row['device_id']))
+            for table in ('samples', 'text_samples'):
+                columns = {row['name'] for row in self.db.execute(f'PRAGMA table_info({table})')}
+                if 'device_id' not in columns:
+                    self.db.execute(f'ALTER TABLE {table} ADD COLUMN device_id INTEGER')
+                    self.db.execute(f'''UPDATE {table} SET device_id=(
+                        SELECT device_id FROM devices WHERE devices.ip={table}.ip)''')
+                self.db.execute(f'CREATE INDEX IF NOT EXISTS {table}_device_time ON {table}(device_id, at)')
+            for table in ('samples', 'text_samples'):
+                trigger = f'{table}_legacy_device_id'
+                if self.db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?", (trigger,)).fetchone():
+                    continue
+                observed_mac = "UPPER(REPLACE(REPLACE(TRIM(json_extract(current.payload,'$.mac')),':',''),'-',''))"
+                # Recover earlier fallback writes only when the saved address has
+                # one known owner. A reused address alone cannot identify a reading.
+                if self.db.execute(f'SELECT 1 FROM {table} WHERE device_id IS NULL LIMIT 1').fetchone():
+                    self.db.execute(f'''WITH address_owners AS (
+                        SELECT ip,MIN(device_id) AS device_id FROM (
+                            SELECT ip,device_id FROM devices WHERE ip IS NOT NULL
+                            UNION SELECT ip,device_id FROM samples WHERE device_id IS NOT NULL
+                            UNION SELECT ip,device_id FROM text_samples WHERE device_id IS NOT NULL
+                        ) GROUP BY ip HAVING COUNT(DISTINCT device_id)=1
+                    ) UPDATE {table} SET device_id=(
+                        SELECT device_id FROM address_owners WHERE address_owners.ip={table}.ip
+                    ) WHERE device_id IS NULL AND ip IN (SELECT ip FROM address_owners)
+                    AND NOT EXISTS (SELECT 1 FROM devices AS current WHERE current.ip={table}.ip
+                        AND hardware_id IS NOT NULL AND hardware_id<>COALESCE({observed_mac},''))''')
+                # Installed collectors from before this migration omit device_id.
+                # Prefer the observed hardware owner if the old collector sees a move.
+                self.db.execute(f'''CREATE TRIGGER {trigger}
+                    AFTER INSERT ON {table} WHEN NEW.device_id IS NULL
+                    BEGIN
+                        UPDATE {table} SET device_id=(SELECT COALESCE(
+                            (SELECT device_id FROM devices WHERE hardware_id={observed_mac}),
+                            CASE WHEN current.hardware_id IS NULL OR current.hardware_id={observed_mac}
+                                THEN current.device_id END
+                        ) FROM devices AS current WHERE current.ip=NEW.ip)
+                        WHERE id=NEW.id;
+                    END''')
 
     def setting(self, key, default=None):
         with self.lock:
@@ -438,14 +511,73 @@ class Store:
         ip = local_ip(ip)
         if name_mode is None:
             name_mode = 'auto' if not name or name in (f'Device .{ip.split(".")[-1]}', f'Unidentified .{ip.split(".")[-1]}') else 'manual'
-        with self.lock:
-            exists = self.db.execute('SELECT ip FROM devices WHERE ip=?', (ip,)).fetchone()
+        with self.lock, self.db:
+            exists = self.device_at(ip)
             if not exists:
-                self.db.execute('INSERT INTO devices(ip,name,room,notes,pinned,expected_sleep,created_at,name_mode) VALUES(?,?,?,?,?,?,?,?)',
-                                (ip, name or f'Device .{ip.split(".")[-1]}', room, notes, int(pinned), int(expected_sleep), now(), name_mode))
-                self.event(ip, 'discovered', f'{name or ip} added to your inventory.')
-                self.db.commit()
+                self.insert_device(ip, name, room, notes, pinned, expected_sleep, name_mode)
             return not exists
+
+    def insert_device(self, ip, name=None, room='Unassigned', notes='', pinned=False, expected_sleep=False, name_mode='auto'):
+        device_id = self.db.execute('''INSERT INTO devices(ip,name,room,notes,pinned,expected_sleep,created_at,name_mode)
+            VALUES(?,?,?,?,?,?,?,?)''',
+            (ip, name or f'Device .{ip.split(".")[-1]}', room, notes, int(pinned), int(expected_sleep), now(), name_mode)).lastrowid
+        self.event(ip, 'discovered', f'{name or ip} added to your inventory.')
+        return self.db.execute('SELECT * FROM devices WHERE device_id=?', (device_id,)).fetchone()
+
+    def device_at(self, ip):
+        return self.db.execute('SELECT * FROM devices WHERE ip=?', (ip,)).fetchone()
+
+    def device_for_hardware(self, mac):
+        return self.db.execute('SELECT * FROM devices WHERE hardware_id=?', (mac,)).fetchone()
+
+    def claim_address(self, ip, current, mac, checked_at):
+        """Resolve an observed address within the caller's lock and transaction."""
+        owner = self.device_for_hardware(mac)
+        for row in (current, owner):
+            if row and checked_at < (row['address_checked_at'] or ''):
+                return None
+        if current and (not owner or current['device_id'] != owner['device_id']):
+            previous = json.loads(current['payload'])
+            previous_mac = firmware_checks.mac_identity(previous.get('mac'))
+            if owner or (previous_mac and previous_mac != mac):
+                device_id = current['device_id']
+                # A new address may already have an empty record awaiting its first check.
+                if not (previous_mac or previous.get('checked_at') or current['last_telemetry']):
+                    self.db.execute('DELETE FROM devices WHERE device_id=?', (device_id,))
+                else:
+                    previous.update(status='unreachable', reachable=False, metrics={}, error=None)
+                    self.db.execute('''UPDATE devices SET ip=NULL,address_checked_at=?,payload=? WHERE device_id=?''',
+                                    (checked_at, json.dumps(previous), device_id))
+                current = None
+        device = owner or current or self.insert_device(ip)
+        self.db.execute('UPDATE devices SET ip=?,hardware_id=?,address_checked_at=? WHERE device_id=?',
+                        (ip, mac, checked_at, device['device_id']))
+        return device
+
+    def discover_device(self, ip, mac, reachable, gateway, checked_at):
+        ip = local_ip(ip)
+        with self.lock, self.db:
+            current = self.device_at(ip)
+            mac = firmware_checks.mac_identity(mac)
+            if not reachable and not current and mac and self.device_for_hardware(mac):
+                return  # An old ARP entry does not put an identified device back at this IP.
+            if mac and reachable:
+                row = self.claim_address(ip, current, mac, checked_at)
+                if not row:
+                    return
+            else:
+                row = current or self.insert_device(ip, 'Network gateway' if gateway else None,
+                                                    notes='Discovered on your local network')
+            payload = json.loads(row['payload'])
+            if mac and reachable:
+                payload['mac'] = ':'.join(mac[i:i+2] for i in range(0, 12, 2))
+                if row['ip'] != ip:
+                    payload.update(status='reachable', reachable=True, metrics={}, error=None)
+            if gateway:
+                payload['kind'] = 'gateway'
+                if row['name_mode'] == 'auto' and not payload.get('discovered_name'):
+                    self.db.execute('UPDATE devices SET name=? WHERE device_id=?', ('Network gateway', row['device_id']))
+            self.db.execute('UPDATE devices SET payload=? WHERE device_id=?', (json.dumps(payload), row['device_id']))
 
     def event(self, ip, kind, message):
         self.db.execute('INSERT INTO events(at,ip,type,message) VALUES(?,?,?,?)', (now(), ip, kind, message))
@@ -457,6 +589,7 @@ class Store:
             for row in rows:
                 item = dict(row)
                 payload = json.loads(item.pop('payload'))
+                del item['hardware_id'], item['address_checked_at']
                 item.update(payload)
                 item['pinned'] = bool(item['pinned'])
                 item['expected_sleep'] = bool(item['expected_sleep'])
@@ -465,21 +598,33 @@ class Store:
                 devices.append(item)
             return devices
 
-    def sample_due(self, ip, key, value, stamp):
+    def sample_due(self, device_id, key, value, stamp):
         if not held_metric(key):
             return True
-        last = self.last_stored.get((ip, key))
+        last = self.last_stored.get((device_id, key))
         return last is None or last[0] != value or stamp - last[1] >= SAMPLE_HEARTBEAT_SECONDS
 
-    def record(self, ip, result):
+    def record(self, ip, result, expected_device_id=None):
+        ip = local_ip(ip)
         stored = {}
         with self.lock, self.db:
-            row = self.db.execute('SELECT * FROM devices WHERE ip=?', (ip,)).fetchone()
-            if not row:
-                return
+            row = self.device_at(ip)
+            mac = firmware_checks.mac_identity(result.get('mac'))
+            if expected_device_id is not None and (not row or row['device_id'] != expected_device_id):
+                # A concurrently observed move may have freed this address. Accept a
+                # verified replacement, but never revive the old occupant from its in-flight probe.
+                owner = self.device_for_hardware(mac) if mac and not row else None
+                if row or not mac or (owner and owner['device_id'] == expected_device_id):
+                    return False
+            checked_at = result['checked_at']
+            if mac:
+                row = self.claim_address(ip, row, mac, checked_at)
+            if not row or checked_at < (row['address_checked_at'] or ''):
+                return False
+            device_id = row['device_id']
             old = json.loads(row['payload'])
-            if result.get('checked_at', '') < old.get('checked_at', ''):
-                return
+            if row['ip'] == ip and checked_at < old.get('checked_at', ''):
+                return False
             # Keep identity and the last successful API payload when a device sleeps.
             payload = {**old, **result}
             latest = dict(old.get('latest_metrics', {}))
@@ -494,10 +639,12 @@ class Store:
             last_seen = now() if result.get('reachable') else row['last_seen']
             last_telemetry = result.get('last_telemetry') or row['last_telemetry']
             payload.pop('last_telemetry', None)
-            if result.get('mac'):
-                value = result['mac'].replace(':', '')
-                if len(value) == 12:
-                    payload['mac'] = ':'.join(value[i:i+2] for i in range(0, 12, 2)).upper()
+            if mac:
+                payload['mac'] = ':'.join(mac[i:i+2] for i in range(0, 12, 2))
+            elif 'mac' in result:
+                payload.pop('mac', None)
+                if old.get('mac'):
+                    payload['mac'] = old['mac']
             if old.get('status') != result.get('status'):
                 text = {'online': 'is reporting live telemetry', 'reachable': 'is reachable; telemetry unavailable',
                         'unreachable': 'did not respond', 'auth_required': 'requires authentication'}.get(result.get('status'), 'was checked')
@@ -508,20 +655,21 @@ class Store:
                     if key.startswith('relay_') and before and before.get('value') != reading['value']:
                         relay_state = 'on' if reading['value'] else 'off'
                         self.event(ip, 'relay_changed', f'{row["name"]}: {reading["label"].lower()} is now {relay_state}.')
-            self.db.execute('UPDATE devices SET payload=?,last_seen=?,last_telemetry=? WHERE ip=?', (json.dumps(payload), last_seen, last_telemetry, ip))
-            stamp = datetime.fromisoformat(result['checked_at']).timestamp()
+            self.db.execute('UPDATE devices SET payload=?,last_seen=?,last_telemetry=? WHERE device_id=?',
+                            (json.dumps(payload), last_seen, last_telemetry, device_id))
+            stamp = datetime.fromisoformat(checked_at).timestamp()
             for key, metric in result.get('metrics', {}).items():
                 if number(metric.get('value')):
-                    if self.sample_due(ip, key, metric['value'], stamp):
-                        self.db.execute('INSERT INTO samples(ip,at,metric,value,unit,label) VALUES(?,?,?,?,?,?)',
-                                        (ip, result['checked_at'], key, metric['value'], metric['unit'], metric['label']))
+                    if self.sample_due(device_id, key, metric['value'], stamp):
+                        self.db.execute('INSERT INTO samples(device_id,ip,at,metric,value,unit,label) VALUES(?,?,?,?,?,?,?)',
+                                        (device_id, ip, checked_at, key, metric['value'], metric['unit'], metric['label']))
                         if held_metric(key):
-                            stored[(ip, key)] = (metric['value'], stamp)
+                            stored[(device_id, key)] = (metric['value'], stamp)
                 elif isinstance(metric.get('value'), str) and len(metric['value']) <= 200:
                     previous = old.get('latest_metrics', {}).get(key, {}).get('value')
                     if previous != metric['value']:
-                        self.db.execute('INSERT INTO text_samples(ip,at,metric,value,unit,label) VALUES(?,?,?,?,?,?)',
-                                        (ip, result['checked_at'], key, metric['value'], metric['unit'], metric['label']))
+                        self.db.execute('INSERT INTO text_samples(device_id,ip,at,metric,value,unit,label) VALUES(?,?,?,?,?,?,?)',
+                                        (device_id, ip, checked_at, key, metric['value'], metric['unit'], metric['label']))
             counter = result.get('metrics', {}).get('energy_kwh', {}).get('value')
             mac = energy.identity(payload.get('mac'))
             if mac and number(counter) and counter >= 0:
@@ -535,11 +683,13 @@ class Store:
                                            (check['device_id'], check['channel'], version))
                 if inserted.rowcount:
                     self.event(ip, 'firmware_update_available', f'Firmware {version} is available for {row["name"]}.')
-        self.last_stored.update(stored)
-        if result.get('reported_name'):
-            self.apply_names([{'ip':ip, 'name':result['reported_name'], 'source':'Device API'}])
+            self.db.commit()
+            self.last_stored.update(stored)
+            if result.get('reported_name'):
+                self.apply_names([{'ip':ip, 'name':result['reported_name'], 'source':'Device API'}])
+        return True
 
-    def patch(self, ip, data):
+    def patch(self, ip, data, *, device_id=None):
         allowed = {'name', 'room', 'notes', 'pinned', 'expected_sleep', 'name_mode'}
         if not data or set(data) - allowed:
             raise ValueError('Only workspace labels, name mode, pinning, and sleep expectation can be updated.')
@@ -561,17 +711,20 @@ class Store:
                     raise ValueError(f'{key} cannot be blank.')
                 normalized[key] = value.strip()
         with self.lock:
-            row = self.db.execute('SELECT * FROM devices WHERE ip=?', (ip,)).fetchone()
+            row = (self.device_at(ip) if device_id is None else
+                   self.db.execute('SELECT * FROM devices WHERE device_id=?', (device_id,)).fetchone())
             if not row:
                 raise ValueError('Device not found.')
             if 'name' in data and 'name_mode' not in data:
                 normalized['name_mode'] = 'manual'
             if normalized.get('name_mode') == 'auto':
-                normalized['name'] = json.loads(row['payload']).get('discovered_name') or f'Device .{ip.split(".")[-1]}'
-            self.db.execute(f'UPDATE devices SET {", ".join(k+"=?" for k in normalized)} WHERE ip=?', [*normalized.values(), ip])
+                fallback = f'Device .{row["ip"].split(".")[-1]}' if row['ip'] else row['name']
+                normalized['name'] = json.loads(row['payload']).get('discovered_name') or fallback
+            self.db.execute(f'UPDATE devices SET {", ".join(k+"=?" for k in normalized)} WHERE device_id=?',
+                            [*normalized.values(), row['device_id']])
             self.db.commit()
 
-    def apply_names(self, observations):
+    def apply_names(self, observations, expected_devices=None):
         grouped = {}
         for entry in observations:
             name = network_names.clean_name(entry.get('name'))
@@ -580,8 +733,8 @@ class Store:
         changed = 0
         with self.lock:
             for ip, names in grouped.items():
-                row = self.db.execute('SELECT * FROM devices WHERE ip=?', (ip,)).fetchone()
-                if not row:
+                row = self.device_at(ip)
+                if not row or (expected_devices is not None and row['device_id'] != expected_devices.get(ip)):
                     continue
                 names = sorted(names, key=network_names.name_rank)[:12]
                 best = names[0]
@@ -609,39 +762,29 @@ class Store:
             self.db.commit()
         return changed
 
-    def history(self, hours=24, ip=None, chart=False):
+    def history(self, hours=24, ip=None, chart=False, *, device_id=None):
         cutoff = datetime.fromtimestamp(time.time() - hours * 3600, timezone.utc).isoformat(timespec='seconds')
-        if chart:
-            bucket = max(POLL_SECONDS, int(hours * 3600 / 300))
-            sql = 'SELECT ip,MIN(at) AS at,metric,AVG(value) AS value,unit,label FROM samples WHERE at>=?'
-        else:
-            sql = 'SELECT ip,at,metric,value,unit,label FROM samples WHERE at>=?'
-        params = [cutoff]
-        if ip:
-            sql += ' AND ip=?'
-            params.append(ip)
-        if chart:
-            sql += " GROUP BY ip,metric,CAST(strftime('%s',at) AS INTEGER)/? ORDER BY at"
-            params.append(bucket)
-        else:
-            text_sql = 'SELECT ip,at,metric,value,unit,label FROM text_samples WHERE at>=?'
-            text_params = [cutoff]
-            if ip:
-                text_sql += ' AND ip=?'
-                text_params.append(ip)
-            sql += ' UNION ALL ' + text_sql + ' ORDER BY at'
-            params.extend(text_params)
         with self.lock:
+            where, params = 'WHERE at>=?', [cutoff]
+            if device_id is not None:
+                where += ' AND device_id=?'
+                params.append(device_id)
+            elif ip:
+                where += ' AND device_id=(SELECT device_id FROM devices WHERE ip=?)'
+                params.append(ip)
             if chart:
-                span_query = 'SELECT MIN(at) AS first,MAX(at) AS last FROM samples WHERE at>=?'
-                span_params = [cutoff]
-                if ip:
-                    span_query += ' AND ip=?'
-                    span_params.append(ip)
-                span = self.db.execute(span_query, span_params).fetchone()
+                bucket = max(POLL_SECONDS, int(hours * 3600 / 300))
+                span = self.db.execute(f'SELECT MIN(at) AS first,MAX(at) AS last FROM samples {where}', params).fetchone()
                 if span['first'] and span['last']:
                     seconds = (datetime.fromisoformat(span['last']) - datetime.fromisoformat(span['first'])).total_seconds()
-                    params[-1] = max(POLL_SECONDS, int(seconds / 300))
+                    bucket = max(POLL_SECONDS, int(seconds / 300))
+                sql = f'''SELECT ip,MIN(at) AS at,metric,AVG(value) AS value,unit,label,device_id FROM samples {where}
+                          GROUP BY COALESCE(device_id,ip),metric,CAST(strftime('%s',at) AS INTEGER)/? ORDER BY at'''
+                params.append(bucket)
+            else:
+                fields = 'ip,at,metric,value,unit,label,device_id'
+                sql = f'SELECT {fields} FROM samples {where} UNION ALL SELECT {fields} FROM text_samples {where} ORDER BY at'
+                params *= 2
             return [dict(r) for r in self.db.execute(sql, params)]
 
     def events(self, limit=50, kind=None):
@@ -707,23 +850,42 @@ class Store:
         ip = local_ip(ip)
         identity = report['device_id']
         # Match a previously identified MAC. A bare LAN packet cannot invent a floor assignment.
-        candidates = [d for d in self.devices() if (d.get('info') or {}).get('type') == 'SHHT-1'
-                      and re.sub('[^0-9A-F]', '', str(d.get('mac', '')).upper()).endswith(identity)]
-        macs = {d.get('mac') for d in candidates}
-        if len(macs) != 1:
-            return False
-        device = max(candidates, key=lambda d: d.get('last_telemetry') or '')
-        if device['ip'] != ip:
-            existing = next((d for d in self.devices() if d['ip'] == ip), None)
-            if existing and existing.get('mac') and existing['mac'] != device['mac']:
+        with self.lock:
+            candidates = [d for d in self.devices() if (d.get('info') or {}).get('type') == 'SHHT-1'
+                          and (firmware_checks.mac_identity(d.get('mac')) or '').endswith(identity)]
+            macs = {firmware_checks.mac_identity(d.get('mac')) for d in candidates}
+            if len(macs) != 1:
                 return False
-            self.add_device(ip, device['name'], device['room'], notes=device['notes'], pinned=True, expected_sleep=True)
-        stamp = now()
-        self.record(ip, {'status': 'online', 'reachable': True, 'checked_at': stamp, 'last_telemetry': stamp,
-                         'telemetry_source': 'CoIoT', 'metrics': report['metrics'], 'error': None,
-                         'info': device['info'], 'model': 'Shelly H&T', 'kind': 'sensor', 'mac': device['mac'],
-                         'protocol': 'shelly-gen1', 'raw_coiot': report['raw'], 'raw_coiot_at': stamp})
-        return True
+            device = max(candidates, key=lambda d: d.get('last_telemetry') or '')
+            row = self.device_at(ip)
+            if row:
+                current_mac = firmware_checks.mac_identity(json.loads(row['payload']).get('mac'))
+                if current_mac and current_mac not in macs:
+                    return False
+            stamp = now()
+            return self.record(ip, {'status': 'online', 'reachable': True, 'checked_at': stamp, 'last_telemetry': stamp,
+                                    'telemetry_source': 'CoIoT', 'metrics': report['metrics'], 'error': None,
+                                    'info': device['info'], 'model': 'Shelly H&T', 'kind': 'sensor', 'mac': device['mac'],
+                                    'protocol': 'shelly-gen1', 'raw_coiot': report['raw'], 'raw_coiot_at': stamp})
+
+    def retention_days(self):
+        days = self.setting('retention_days', RETENTION_DAYS)
+        valid = isinstance(days, int) and not isinstance(days, bool) and 1 <= days <= RETENTION_DAYS
+        return days if valid else RETENTION_DAYS
+
+    def set_retention_days(self, days):
+        """Save how many days of history to keep. Returns the previous length."""
+        if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= RETENTION_DAYS:
+            raise ValueError(f'Keep history for 1 to {RETENTION_DAYS} days.')
+        previous = self.retention_days()
+        self.save_setting('retention_days', days)
+        return previous
+
+    def reclaim_space(self):
+        """Return deleted rows' space to the disk; SQLite otherwise keeps it for reuse."""
+        with self.lock:
+            self.db.execute('VACUUM')
+            self.db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
 
     def compact_history(self):
         """Drop stored repeats of held readings, then reclaim the file space.
@@ -743,16 +905,15 @@ class Store:
                   SELECT id, value, LAG(value) OVER w AS previous, LEAD(value) OVER w AS next,
                          {bucket} AS bucket, LAG({bucket}) OVER w AS previous_bucket
                   FROM samples WHERE {held}
-                  WINDOW w AS (PARTITION BY ip,metric ORDER BY at,id))
+                  WINDOW w AS (PARTITION BY COALESCE(device_id,ip),metric ORDER BY at,id))
                 WHERE previous = value AND next = value AND previous_bucket = bucket)''', params)
             self.db.commit()
             after = self.db.execute('SELECT COUNT(*) FROM samples').fetchone()[0]
-            self.db.execute('VACUUM')
-            self.db.execute('PRAGMA wal_checkpoint(TRUNCATE)')
+            self.reclaim_space()
         return before - after, after
 
     def cleanup(self):
-        cutoff = datetime.fromtimestamp(time.time() - RETENTION_DAYS * 86400, timezone.utc).isoformat(timespec='seconds')
+        cutoff = datetime.fromtimestamp(time.time() - self.retention_days() * 86400, timezone.utc).isoformat(timespec='seconds')
         with self.lock:
             self.db.execute('DELETE FROM samples WHERE at<?', (cutoff,))
             self.db.execute('DELETE FROM text_samples WHERE at<?', (cutoff,))
@@ -791,11 +952,12 @@ class Collector:
                 self.state['last_name_discovery'] = previous_names['value']
 
     def snapshot(self):
+        retention_days = self.store.retention_days()
         with self.state_lock:
             last = self.state['last_poll'] or self.state['started_at']
             age = max(0, (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds())
             health = 'delayed' if age > 120 or self.state['collection_error'] else 'healthy' if self.has_completed_cycle else 'starting'
-            return {**self.state, 'network': self.network.copy(), 'poll_seconds': POLL_SECONDS, 'retention_days': RETENTION_DAYS,
+            return {**self.state, 'network': self.network.copy(), 'poll_seconds': POLL_SECONDS, 'retention_days': retention_days,
                     'health': health, 'seconds_since_poll': round(age), 'database_path': str(self.store.path)}
 
     def poll(self):
@@ -804,16 +966,17 @@ class Collector:
         try:
             self.state['polling'] = True
             self.network = network_info()
-            devices = self.store.devices()
+            devices = [device for device in self.store.devices() if device['ip']]
             failures = 0
             with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
-                futures = {pool.submit(probe_device, device): device['ip'] for device in devices}
+                futures = {pool.submit(probe_device, device): device for device in devices}
                 for future in concurrent.futures.as_completed(futures):
+                    device = futures[future]
                     try:
-                        self.store.record(futures[future], future.result())
+                        self.store.record(device['ip'], future.result(), expected_device_id=device['device_id'])
                     except Exception as exc:
                         failures += 1
-                        print(f'Collector: {futures[future]}: {exc}', flush=True)
+                        print(f'Collector: {device["ip"]}: {exc}', flush=True)
             if failures:
                 raise RuntimeError(f'{failures} device readings could not be saved. Retrying next cycle.')
             self.store.cleanup()
@@ -897,9 +1060,9 @@ class Collector:
 
     def discover_names(self):
         try:
-            devices = self.store.devices()
-            found, errors = network_names.discover([d['ip'] for d in devices], self.network)
-            self.store.apply_names(found)
+            devices = {d['ip']: d['device_id'] for d in self.store.devices() if d['ip']}
+            found, errors = network_names.discover(list(devices), self.network)
+            self.store.apply_names(found, expected_devices=devices)
             self.state.update(last_name_discovery=now(), names_found=len({x['ip'] for x in found}), name_discovery_errors=errors)
             with self.store.lock:
                 self.store.db.execute("INSERT INTO settings(key,value) VALUES('last_name_discovery',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (self.state['last_name_discovery'],))
@@ -937,21 +1100,14 @@ class Collector:
             entries = arp_entries(network.get('local_ip'))
             # ARP cache membership is discovery evidence, not evidence a host is online now.
             targets = reachable | {ip for ip in entries if ipaddress.ip_address(ip) in subnet}
+            mac_counts = Counter(entries[ip] for ip in reachable if ip in entries)
+            checked_at = now()
             for ip in sorted(targets, key=ipaddress.ip_address):
                 if ip == network.get('local_ip'):
                     continue
-                name = 'Network gateway' if ip == network.get('gateway') else None
-                self.store.add_device(ip, name, notes='Discovered on your local network')
-                if entries.get(ip) or ip == network.get('gateway'):
-                    with self.store.lock:
-                        row = self.store.db.execute('SELECT payload FROM devices WHERE ip=?', (ip,)).fetchone()
-                        payload = json.loads(row['payload'])
-                        if entries.get(ip):
-                            payload['mac'] = entries[ip]
-                        if ip == network.get('gateway'):
-                            payload['kind'] = 'gateway'
-                        self.store.db.execute('UPDATE devices SET payload=? WHERE ip=?', (json.dumps(payload), ip))
-                        self.store.db.commit()
+                mac = entries.get(ip)
+                confirmed = ip in reachable and mac_counts[mac] == 1
+                self.store.discover_device(ip, mac, confirmed, ip == network.get('gateway'), checked_at)
             self.state['last_scan'] = now()
             with self.store.lock:
                 self.store.db.execute("INSERT INTO settings(key,value) VALUES('last_scan',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (self.state['last_scan'],))
@@ -1092,7 +1248,10 @@ class Handler(SimpleHTTPRequestHandler):
                 ip = query.get('ip', [None])[0]
                 if ip:
                     ip = local_ip(ip)
-                rows = self.store.history(hours, ip, chart=parsed.path == '/api/history')
+                device_id = inventory_id(query['device_id'][0]) if 'device_id' in query else None
+                if ip and device_id is not None:
+                    raise ValueError('Filter by either IP address or device ID.')
+                rows = self.store.history(hours, ip, chart=parsed.path == '/api/history', device_id=device_id)
             except ValueError as exc:
                 return self.send_json({'error': str(exc)}, 400)
             if parsed.path == '/api/history':
@@ -1100,7 +1259,7 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.send_json({'samples': rows, 'hours': hours, 'held': held,
                                        'heartbeat_seconds': SAMPLE_HEARTBEAT_SECONDS})
             output = io.StringIO(newline='')
-            writer = csv.DictWriter(output, fieldnames=['ip', 'at', 'metric', 'value', 'unit', 'label'])
+            writer = csv.DictWriter(output, fieldnames=['ip', 'at', 'metric', 'value', 'unit', 'label', 'device_id'])
             writer.writeheader()
             writer.writerows({key:csv_value(value) for key,value in row.items()} for row in rows)
             body = output.getvalue().encode('utf-8-sig')
@@ -1140,6 +1299,19 @@ class Handler(SimpleHTTPRequestHandler):
             data = self.mutation()
             if self.path == '/api/settings/heating':
                 self.store.heating_settings(data)
+                return self.send_json({'ok': True})
+            if self.path == '/api/settings/retention':
+                if set(data) != {'days'}:
+                    raise ValueError('Provide the number of days to keep history.')
+                store = self.store
+                if data['days'] < store.set_retention_days(data['days']):
+                    def shorten():
+                        try:
+                            store.cleanup()
+                            store.reclaim_space()
+                        except sqlite3.Error as exc:
+                            print(f'Could not reclaim space after shortening history: {exc}', flush=True)
+                    threading.Thread(target=shorten, daemon=True).start()
                 return self.send_json({'ok': True})
             if self.path == '/api/refresh':
                 self.collector.start_poll()
@@ -1207,7 +1379,10 @@ class Handler(SimpleHTTPRequestHandler):
             match = re.fullmatch(r'/api/devices/([\d.]+)', self.path)
             if not match:
                 return self.send_json({'error': 'Endpoint not found.'}, 404)
-            self.store.patch(local_ip(match[1]), data)
+            if '.' in match[1]:
+                self.store.patch(local_ip(match[1]), data)
+            else:
+                self.store.patch(None, data, device_id=inventory_id(match[1]))
             return self.send_json({'ok': True})
         except (ValueError, TypeError) as exc:
             return self.send_json({'error': str(exc)}, 400)
