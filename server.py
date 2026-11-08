@@ -29,6 +29,8 @@ import media_readers
 import energy
 import reliability
 import routers
+import bacnet
+import modbus
 from firmware import checks as firmware_checks
 from firmware.adapters import cast, nest, roku, shelly, sonos, wiim
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -54,6 +56,15 @@ FIRMWARE_ADAPTERS = {**FIRMWARE_CATALOGS, 'roku': roku}
 FIRMWARE_CATALOG_KEYS = {source: f'{source}_stable_catalog' for source in FIRMWARE_CATALOGS}
 FIRMWARE_CATALOG_KEYS['nest'] = 'nest_production_catalog'  # Refresh the old Mini-only cache on upgrade.
 RFC1918 = [ipaddress.ip_network(x) for x in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')]
+MONITOR_READERS = {'bacnet-ip': bacnet, 'modbus-tcp': modbus}
+
+
+def validate_monitor_config(value):
+    if value is None or value == {}:
+        return {}
+    if not isinstance(value, dict) or not isinstance(value.get('protocol'), str) or value['protocol'] not in MONITOR_READERS:
+        raise ValueError('Choose a supported monitoring protocol.')
+    return MONITOR_READERS[value['protocol']].validate_config(value)
 
 
 def now():
@@ -302,6 +313,9 @@ def normalize(info, status):
 
 
 def probe_device(device):
+    reader = MONITOR_READERS.get(device.get('monitor_config', {}).get('protocol'))
+    if reader:
+        return reader.read(device, now())
     ip = device['ip']
     alive, latency = ping(ip)
     result = {'reachable': alive, 'latency_ms': latency, 'metrics': {}, 'error': None, 'checked_at': now()}
@@ -388,6 +402,8 @@ class Store:
             counter_kwh REAL NOT NULL, uptime_s REAL, PRIMARY KEY(source_id,at));
         ''')
         self.migrate_device_identity()
+        if 'monitor_config' not in {row['name'] for row in self.db.execute('PRAGMA table_info(devices)')}:
+            self.db.execute("ALTER TABLE devices ADD COLUMN monitor_config TEXT NOT NULL DEFAULT '{}'")
         if not self.setting('energy_migrated'):
             # Existing samples predate hardware-keyed energy history. Import their
             # identified meter identity once; new readings carry identity at capture.
@@ -507,14 +523,16 @@ class Store:
                                       for mac, d in energy.meter_devices(devices).items()]
         return result
 
-    def add_device(self, ip, name=None, room='Unassigned', notes='', pinned=False, expected_sleep=False, name_mode=None):
+    def add_device(self, ip, name=None, room='Unassigned', notes='', pinned=False, expected_sleep=False, name_mode=None, monitor_config=None):
         ip = local_ip(ip)
+        config = validate_monitor_config(monitor_config)
         if name_mode is None:
             name_mode = 'auto' if not name or name in (f'Device .{ip.split(".")[-1]}', f'Unidentified .{ip.split(".")[-1]}') else 'manual'
         with self.lock, self.db:
             exists = self.device_at(ip)
             if not exists:
-                self.insert_device(ip, name, room, notes, pinned, expected_sleep, name_mode)
+                row = self.insert_device(ip, name, room, notes, pinned, expected_sleep, name_mode)
+                self.db.execute('UPDATE devices SET monitor_config=? WHERE device_id=?', (json.dumps(config), row['device_id']))
             return not exists
 
     def insert_device(self, ip, name=None, room='Unassigned', notes='', pinned=False, expected_sleep=False, name_mode='auto'):
@@ -589,8 +607,13 @@ class Store:
             for row in rows:
                 item = dict(row)
                 payload = json.loads(item.pop('payload'))
+                config = json.loads(item.pop('monitor_config'))
                 del item['hardware_id'], item['address_checked_at']
                 item.update(payload)
+                item['monitor_config'] = config
+                if config:
+                    item['protocol'] = config['protocol']
+                    item['kind'] = 'commercial'
                 item['pinned'] = bool(item['pinned'])
                 item['expected_sleep'] = bool(item['expected_sleep'])
                 item.setdefault('status', 'pending')
@@ -604,11 +627,14 @@ class Store:
         last = self.last_stored.get((device_id, key))
         return last is None or last[0] != value or stamp - last[1] >= SAMPLE_HEARTBEAT_SECONDS
 
-    def record(self, ip, result, expected_device_id=None):
+    def record(self, ip, result, expected_device_id=None, expected_monitor_config=None):
         ip = local_ip(ip)
         stored = {}
         with self.lock, self.db:
             row = self.device_at(ip)
+            if expected_monitor_config is not None and ((row and json.loads(row['monitor_config']) != expected_monitor_config)
+                                                        or (not row and expected_monitor_config)):
+                return False  # Configuration changed while this request was in flight.
             mac = firmware_checks.mac_identity(result.get('mac'))
             if expected_device_id is not None and (not row or row['device_id'] != expected_device_id):
                 # A concurrently observed move may have freed this address. Accept a
@@ -621,6 +647,8 @@ class Store:
                 row = self.claim_address(ip, row, mac, checked_at)
             if not row or checked_at < (row['address_checked_at'] or ''):
                 return False
+            if expected_monitor_config is not None and json.loads(row['monitor_config']) != expected_monitor_config:
+                return False  # A hardware identity move selected a differently configured owner.
             device_id = row['device_id']
             old = json.loads(row['payload'])
             if row['ip'] == ip and checked_at < old.get('checked_at', ''):
@@ -690,11 +718,14 @@ class Store:
         return True
 
     def patch(self, ip, data, *, device_id=None):
-        allowed = {'name', 'room', 'notes', 'pinned', 'expected_sleep', 'name_mode'}
+        allowed = {'name', 'room', 'notes', 'pinned', 'expected_sleep', 'name_mode', 'monitor_config'}
         if not data or set(data) - allowed:
-            raise ValueError('Only workspace labels, name mode, pinning, and sleep expectation can be updated.')
+            raise ValueError('Only workspace labels and local monitoring settings can be updated.')
         normalized = {}
         for key, value in data.items():
+            if key == 'monitor_config':
+                normalized[key] = json.dumps(validate_monitor_config(value))
+                continue
             if key == 'name_mode':
                 if value not in ('manual', 'auto'):
                     raise ValueError('Name mode must be manual or auto.')
@@ -720,6 +751,15 @@ class Store:
             if normalized.get('name_mode') == 'auto':
                 fallback = f'Device .{row["ip"].split(".")[-1]}' if row['ip'] else row['name']
                 normalized['name'] = json.loads(row['payload']).get('discovered_name') or fallback
+            if 'monitor_config' in normalized and json.loads(normalized['monitor_config']) != json.loads(row['monitor_config']):
+                previous = json.loads(row['payload'])
+                # Reconfiguration preserves workspace data and history, but old
+                # telemetry must not look like a reading from the new point map.
+                identity_keys = {'mac', 'discovered_name', 'discovered_name_source', 'advertised_names',
+                                 'name_discovered_at', 'hostname', 'advertised_model'}
+                payload = {key: value for key, value in previous.items() if key in identity_keys}
+                payload.update(status='pending', metrics={})
+                normalized['payload'] = json.dumps(payload)
             self.db.execute(f'UPDATE devices SET {", ".join(k+"=?" for k in normalized)} WHERE device_id=?',
                             [*normalized.values(), row['device_id']])
             self.db.commit()
@@ -973,7 +1013,8 @@ class Collector:
                 for future in concurrent.futures.as_completed(futures):
                     device = futures[future]
                     try:
-                        self.store.record(device['ip'], future.result(), expected_device_id=device['device_id'])
+                        self.store.record(device['ip'], future.result(), expected_device_id=device['device_id'],
+                                          expected_monitor_config=device['monitor_config'])
                     except Exception as exc:
                         failures += 1
                         print(f'Collector: {device["ip"]}: {exc}', flush=True)
@@ -1343,7 +1384,7 @@ class Handler(SimpleHTTPRequestHandler):
             if self.path == '/api/names/refresh':
                 return self.send_json({'ok': True, 'started': self.collector.start_naming()}, 202)
             if self.path == '/api/devices':
-                allowed = {'ip', 'name', 'room', 'expected_sleep'}
+                allowed = {'ip', 'name', 'room', 'expected_sleep', 'monitor_config'}
                 if set(data) - allowed:
                     raise ValueError('Unexpected device properties.')
                 ip = local_ip(data.get('ip', ''))
@@ -1355,7 +1396,8 @@ class Handler(SimpleHTTPRequestHandler):
                 sleeping = data.get('expected_sleep', False)
                 if not isinstance(sleeping, bool):
                     raise ValueError('expected_sleep must be true or false.')
-                added = self.store.add_device(ip, data['name'].strip(), room.strip(), pinned=True, expected_sleep=sleeping, name_mode='manual')
+                added = self.store.add_device(ip, data['name'].strip(), room.strip(), pinned=True, expected_sleep=sleeping,
+                                              name_mode='manual', monitor_config=data.get('monitor_config'))
                 if not added:
                     raise ValueError('This IP address is already in your inventory.')
                 self.collector.start_poll()

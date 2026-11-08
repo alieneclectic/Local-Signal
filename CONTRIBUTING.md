@@ -53,6 +53,16 @@ For a Shelly Gen 1 device that uses the existing endpoints, add its exact `/shel
 4. Use bounded read-only requests. LAN adapters should target validated private IPv4 addresses and disable redirects and proxies. Document the endpoint and any required authentication. Use `RouterError` with a message safe for display. Reserve `unsupported` for a model the adapter has identified as incompatible, and use `setup_required` for configuration or authentication failures.
 5. Add synthetic or redacted fixtures for normal, incomplete, and failed reads. Include a test for any partial capability or model restriction and use a temporary database. The [router tests](tests/test_routers.py) show how to exercise the shared contract without contacting a router.
 
+## Commercial device monitoring
+
+[`bacnet.py`](bacnet.py) implements the narrow direct-unicast BACnet/IP reader; [`tests/test_bacnet.py`](tests/test_bacnet.py) exercises actual UDP on loopback and malformed packets without LAN access. Configuration is local inventory data in `devices.monitor_config`, validated on add and edit. Collection verifies the configured device instance before reading points. Point keys include the device instance, object type, object instance, and reported unit so unrelated points or changed units are not combined in history. Point labels do not imply room temperature, power totals, or heating-energy counters.
+
+[`modbus.py`](modbus.py) implements only Modbus TCP read functions 01–04; [`tests/test_modbus.py`](tests/test_modbus.py) covers fragmented TCP responses, decoding, exceptions, malformed frames, persistence, and API guards. `server.MONITOR_READERS` selects the validator and reader for each monitoring protocol. Use zero-based addresses, explicit model-specific format/units, and finite scaling. Keep each numeric value's registers in one read. After a transport or framing failure, stop using that connection for the rest of the poll; complete exception responses and invalid numeric readings may leave other points usable. Point history keys include inventory identity, unit ID, table/address, and a digest of the interpretation settings. Label edits preserve history; format, scaling, or unit changes create a new series. Modbus unit IDs are not hardware identities, and generic register readings are not automatically heating-energy sources.
+
+Keep the request set read-only and bounded. Add synthetic evidence for new object types or transport features before expanding the stated support. Follow the [commercial validation checklist](docs/commercial-devices.md#hardware-validation) before claiming a specific manufacturer/model works.
+
+For the device → collector → temporary database → HTTP/history/CSV path, use the [commercial end-to-end harness](docs/commercial-e2e.md). Install `requirements-e2e.txt` into an isolated test environment, then run `python tools/commercial_e2e.py` for local BACnet or add `--pult` to explicitly enable the fixed public Modbus demo. `--serve` keeps a disposable dashboard available for browser checks and named BACnet scenarios. The normal unit suite stays offline; the harness leaves the app's private-network restrictions unchanged.
+
 ## Verify and submit
 
 Run these checks from the repo root before opening a pull request.

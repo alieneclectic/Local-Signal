@@ -1,0 +1,2 @@
+# Optional, test-only BACnet simulator. Not part of collector packaging.
+bacpypes3==0.0.110

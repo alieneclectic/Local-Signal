@@ -43,8 +43,16 @@ For Windows collector setup and the Briefcase installer previews, see the [packa
 | Roku | Player status, active app, firmware, and other details exposed by the local API. |
 | Sonos and WiiM | Volume, mute, playback state, and available track metadata through UPnP. |
 | Google Cast receivers | Receiver activity, active app, volume, and available media metadata with PyChromecast installed. |
+| BACnet/IP building devices (experimental) | Configured analog, binary, and multi-state points, reported units and quality flags, plus model and installed firmware when available. Direct unicast only. |
+| Modbus TCP equipment (experimental) | Configured holding/input registers, coils, and discrete inputs. Numeric types, byte/word order, units, scaling, and raw invalid-value markers come from the device's register map. |
 
 Discovery can find devices that don't expose telemetry. Available fields depend on the device model and what its local API exposes. Devices that sleep or sit on another subnet may be missed by a scan. Last reported readings are shown separately from fresh ones, and internal board temperature is separate from room temperature.
+
+For commercial controllers and sensors, choose **BACnet/IP** under **Monitoring** when adding a device or saving its details. Enter its private IP address, BACnet device instance, UDP port (normally 47808), and 1–12 point types, instances, and labels from your building administrator's point list. Monitoring uses only unicast `ReadProperty` requests; scans do not discover BACnet devices or their points. BACnet/SC, routed MS/TP, BBMD/foreign-device registration, and segmented responses are not supported.
+
+For meters, drives, and other Modbus equipment, choose **Modbus TCP** under **Monitoring**. Enter the private IP, TCP port (normally 502), unit ID, and up to 12 read points from the exact model's register map. Addresses are **zero-based offsets**; verify the manual's convention before entering a reference such as 40001. Choose the table, numeric format, byte/word order, unit, scale, and offset; optionally specify the manufacturer's raw invalid value. Only read functions 01–04 are sent. Plain Modbus TCP is supported; Modbus Security/TLS and direct serial/RTU are not included.
+
+Neither commercial reader needs an extra Python dependency. Manufacturer compatibility has not been verified on physical hardware. See [commercial device research and setup](docs/commercial-devices.md) for the rationale, boundaries, examples, and validation steps.
 
 Devices identified by a LiftMaster or myQ name show **Manual check** under **Devices → Firmware**. Expand the card for instructions on looking up the firmware version in the myQ app. If the device name or model includes **98022** or **98022MC**, the card shows the wall control instructions from the LiftMaster owner’s manual.
 
