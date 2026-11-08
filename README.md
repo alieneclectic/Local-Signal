@@ -45,6 +45,8 @@ For Windows collector setup and the Briefcase installer previews, see the [packa
 | Google Cast receivers | Receiver activity, active app, volume, and available media metadata with PyChromecast installed. |
 | BACnet/IP building devices (experimental) | Configured analog, binary, and multi-state points, reported units and quality flags, plus model and installed firmware when available. Direct unicast only. |
 | Modbus TCP equipment (experimental) | Configured holding/input registers, coils, and discrete inputs. Numeric types, byte/word order, units, scaling, and raw invalid-value markers come from the device's register map. |
+| IPP network printers (experimental) | Printer state, queue count, accepting-jobs status, and supply percentages when reported. |
+| UPS systems through NUT (experimental) | Battery charge/runtime, UPS status/load, power, voltage, frequency, and device temperatures when exposed by an existing Network UPS Tools server. |
 
 Discovery can find devices that don't expose telemetry. Available fields depend on the device model and what its local API exposes. Devices that sleep or sit on another subnet may be missed by a scan. Last reported readings are shown separately from fresh ones, and internal board temperature is separate from room temperature.
 
@@ -52,7 +54,13 @@ For commercial controllers and sensors, choose **BACnet/IP** under **Monitoring*
 
 For meters, drives, and other Modbus equipment, choose **Modbus TCP** under **Monitoring**. Enter the private IP, TCP port (normally 502), unit ID, and up to 12 read points from the exact model's register map. Addresses are **zero-based offsets**; verify the manual's convention before entering a reference such as 40001. Choose the table, numeric format, byte/word order, unit, scale, and offset; optionally specify the manufacturer's raw invalid value. Only read functions 01–04 are sent. Plain Modbus TCP is supported; Modbus Security/TLS and direct serial/RTU are not included.
 
-Neither commercial reader needs an extra Python dependency. Manufacturer compatibility has not been verified on physical hardware. See [commercial device research and setup](docs/commercial-devices.md) for the rationale, boundaries, examples, and validation steps.
+For network printers, choose **IPP — network printer** and enter the private IP, port (normally 631), and printer path (often `/ipp/print`). Enable TLS only when the printer has a trusted certificate valid for its IP. Only `Get-Printer-Attributes` is sent; no print jobs or configuration changes are submitted. Authenticated printers are not supported yet.
+
+For a UPS, choose **NUT — UPS server**, enter the private IP of an existing Network UPS Tools server, its TCP port (normally 3493), and the configured UPS name. This reader uses anonymous `LIST VAR` only. TLS and authenticated NUT connections are not supported. One UPS can be configured per server IP; available readings depend on its NUT driver.
+
+These commercial readers need no extra Python dependencies. Manufacturer compatibility has not been verified on physical hardware. See [commercial device research and setup](docs/commercial-devices.md) for the rationale, boundaries, examples, and validation steps.
+
+Settings shows the last collection duration. A warning appears when collection takes at least 30 seconds. CSV exports stream in batches. Charts fetch one selected metric, can be narrowed to a device, and share a 12,000-point budget across the view; full-resolution samples remain in CSV exports. See [capacity measurements and remaining limits](docs/capacity.md).
 
 Devices identified by a LiftMaster or myQ name show **Manual check** under **Devices → Firmware**. Expand the card for instructions on looking up the firmware version in the myQ app. If the device name or model includes **98022** or **98022MC**, the card shows the wall control instructions from the LiftMaster owner’s manual.
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from contextlib import closing
 import concurrent.futures
 import csv
 from datetime import datetime, timezone
@@ -31,6 +32,8 @@ import reliability
 import routers
 import bacnet
 import modbus
+import ipp
+import nut
 from firmware import checks as firmware_checks
 from firmware.adapters import cast, nest, roku, shelly, sonos, wiim
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -42,6 +45,8 @@ ROOT = Path(__file__).resolve().parent
 WEB_ASSETS = ('/index.html', '/app.js', '/theme.js', '/style.css', '/favicon.svg')
 DEV_RELOAD = os.environ.get('LOCAL_SIGNAL_DEV_RELOAD')
 POLL_SECONDS = 30
+CHART_MAX_POINTS = 12_000
+CHART_POINTS_PER_SERIES = 300
 RETENTION_DAYS = 30  # Longest history the dashboard keeps; the chosen length is a setting.
 # Slow-changing readings are stored when they change, and at most this often when they do not.
 # The value history is lossless: an omitted row repeats the previous stored value.
@@ -56,7 +61,8 @@ FIRMWARE_ADAPTERS = {**FIRMWARE_CATALOGS, 'roku': roku}
 FIRMWARE_CATALOG_KEYS = {source: f'{source}_stable_catalog' for source in FIRMWARE_CATALOGS}
 FIRMWARE_CATALOG_KEYS['nest'] = 'nest_production_catalog'  # Refresh the old Mini-only cache on upgrade.
 RFC1918 = [ipaddress.ip_network(x) for x in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')]
-MONITOR_READERS = {'bacnet-ip': bacnet, 'modbus-tcp': modbus}
+MONITOR_READERS = {'bacnet-ip': bacnet, 'modbus-tcp': modbus, 'ipp': ipp, 'nut-ups': nut}
+MONITOR_KINDS = {'ipp': 'printer', 'nut-ups': 'ups'}
 
 
 def validate_monitor_config(value):
@@ -613,7 +619,7 @@ class Store:
                 item['monitor_config'] = config
                 if config:
                     item['protocol'] = config['protocol']
-                    item['kind'] = 'commercial'
+                    item['kind'] = MONITOR_KINDS.get(config['protocol'], 'commercial')
                 item['pinned'] = bool(item['pinned'])
                 item['expected_sleep'] = bool(item['expected_sleep'])
                 item.setdefault('status', 'pending')
@@ -803,6 +809,8 @@ class Store:
         return changed
 
     def history(self, hours=24, ip=None, chart=False, *, device_id=None):
+        if chart:
+            return self.chart_history(hours, ip, device_id=device_id)['samples']
         cutoff = datetime.fromtimestamp(time.time() - hours * 3600, timezone.utc).isoformat(timespec='seconds')
         with self.lock:
             where, params = 'WHERE at>=?', [cutoff]
@@ -812,26 +820,92 @@ class Store:
             elif ip:
                 where += ' AND device_id=(SELECT device_id FROM devices WHERE ip=?)'
                 params.append(ip)
-            if chart:
-                bucket = max(POLL_SECONDS, int(hours * 3600 / 300))
-                span = self.db.execute(f'SELECT MIN(at) AS first,MAX(at) AS last FROM samples {where}', params).fetchone()
-                if span['first'] and span['last']:
-                    seconds = (datetime.fromisoformat(span['last']) - datetime.fromisoformat(span['first'])).total_seconds()
-                    bucket = max(POLL_SECONDS, int(seconds / 300))
-                sql = f'''SELECT ip,MIN(at) AS at,metric,AVG(value) AS value,unit,label,device_id FROM samples {where}
-                          GROUP BY COALESCE(device_id,ip),metric,CAST(strftime('%s',at) AS INTEGER)/? ORDER BY at'''
-                params.append(bucket)
-            else:
-                fields = 'ip,at,metric,value,unit,label,device_id'
-                sql = f'SELECT {fields} FROM samples {where} UNION ALL SELECT {fields} FROM text_samples {where} ORDER BY at'
-                params *= 2
+            fields = 'ip,at,metric,value,unit,label,device_id'
+            sql = f'SELECT {fields} FROM samples {where} UNION ALL SELECT {fields} FROM text_samples {where} ORDER BY at'
+            params *= 2
             return [dict(r) for r in self.db.execute(sql, params)]
+
+    def chart_history(self, hours=24, ip=None, *, device_id=None, metric=None):
+        """Read just the selected metric with a total point budget.
+
+        The small metric catalog keeps historical readings discoverable without
+        loading every series. A separate WAL snapshot leaves collection free to
+        write while SQLite groups the requested history.
+        """
+        if metric is not None and (not isinstance(metric, str) or not 1 <= len(metric) <= 200 or
+                                   any(ord(char) < 32 for char in metric)):
+            raise ValueError('Choose a metric identifier of 1 to 200 characters.')
+        cutoff = datetime.fromtimestamp(time.time() - hours * 3600, timezone.utc).isoformat(timespec='seconds')
+        where, params = 'WHERE at>=?', [cutoff]
+        if device_id is not None:
+            where += ' AND device_id=?'
+            params.append(device_id)
+        elif ip:
+            where += ' AND device_id=(SELECT device_id FROM devices WHERE ip=?)'
+            params.append(ip)
+        with closing(sqlite3.connect(self.path.as_uri() + '?mode=ro', uri=True)) as db:
+            db.row_factory = sqlite3.Row
+            db.execute('BEGIN')
+            catalog = [dict(row) for row in db.execute(f'''
+                SELECT metric,MAX(label) AS label,MAX(unit) AS unit,MIN(device_id) AS device_id,
+                       COUNT(DISTINCT COALESCE(device_id,ip)) AS devices,MIN(at) AS first,MAX(at) AS last
+                FROM samples {where} GROUP BY metric ORDER BY metric''', params)]
+            selected = [entry for entry in catalog if metric is None or entry['metric'] == metric]
+            series = sum(entry['devices'] for entry in selected)
+            per_series = max(2, min(CHART_POINTS_PER_SERIES, CHART_MAX_POINTS // max(1, series)))
+            seconds = 0
+            if selected:
+                first = min(entry['first'] for entry in selected)
+                last = max(entry['last'] for entry in selected)
+                seconds = (datetime.fromisoformat(last) - datetime.fromisoformat(first)).total_seconds()
+            bucket = max(POLL_SECONDS, math.ceil(math.ceil(seconds) / (per_series - 1)))
+            if metric is not None:
+                where += ' AND metric=?'
+                params.append(metric)
+            rows = [dict(row) for row in db.execute(f'''
+                SELECT ip,MIN(at) AS at,metric,AVG(value) AS value,unit,label,device_id
+                FROM samples {where}
+                GROUP BY COALESCE(device_id,ip),metric,CAST(strftime('%s',at) AS INTEGER)/?
+                ORDER BY at LIMIT ?''', [*params, bucket, CHART_MAX_POINTS + 1])]
+        return {'samples': rows[:CHART_MAX_POINTS],
+                'metrics': [{key: value for key, value in entry.items() if key not in ('first', 'last')} for entry in catalog],
+                'points_limited': len(rows) > CHART_MAX_POINTS, 'point_budget': CHART_MAX_POINTS,
+                'bucket_seconds': bucket}
 
     def events(self, limit=50, kind=None):
         with self.lock:
             if kind is not None:
                 return [dict(r) for r in self.db.execute('SELECT * FROM events WHERE type=? ORDER BY id DESC LIMIT ?', (kind, limit))]
             return [dict(r) for r in self.db.execute('SELECT * FROM events ORDER BY id DESC LIMIT ?', (limit,))]
+
+    def csv_chunks(self, hours=24, ip=None, *, device_id=None):
+        """Stream a consistent read snapshot without holding the collector lock.
+
+        SQLite's WAL permits collection while the separate read-only connection
+        exports. Each batch is at most 256 rows; no complete history list/body.
+        """
+        cutoff = datetime.fromtimestamp(time.time() - hours * 3600, timezone.utc).isoformat(timespec='seconds')
+        where, params = 'WHERE at>=?', [cutoff]
+        if device_id is not None:
+            where += ' AND device_id=?'
+            params.append(device_id)
+        elif ip:
+            where += ' AND device_id=(SELECT device_id FROM devices WHERE ip=?)'
+            params.append(ip)
+        fields = ['ip', 'at', 'metric', 'value', 'unit', 'label', 'device_id']
+        selected = ','.join(fields)
+        with closing(sqlite3.connect(self.path.as_uri() + '?mode=ro', uri=True)) as db:
+            db.row_factory = sqlite3.Row
+            cursor = db.execute(f'SELECT {selected} FROM samples {where} UNION ALL SELECT {selected} FROM text_samples {where} ORDER BY at', params * 2)
+            output = io.StringIO(newline='')
+            writer = csv.DictWriter(output, fieldnames=fields)
+            writer.writeheader()
+            yield b'\xef\xbb\xbf' + output.getvalue().encode('utf-8')
+            while batch := cursor.fetchmany(256):
+                output.seek(0)
+                output.truncate(0)
+                writer.writerows({key: csv_value(row[key]) for key in fields} for row in batch)
+                yield output.getvalue().encode('utf-8')
 
     def link_room(self, room_id, ip, metric='temperature_c'):
         if room_id not in ROOM_NAMES:
@@ -979,7 +1053,9 @@ class Collector:
                       'sensor_listener': False, 'sensor_listener_error': None, 'sensor_reports': 0, 'last_sensor_report': None}
         self.state.update(naming=False, last_name_discovery=None, names_found=0, name_discovery_errors=[])
         self.state.update(collection_error=None, background=False, backup=self.store.setting('backup'), backup_error=None,
-                          last_poll=self.store.setting('last_completed_poll'), last_gap=self.store.setting('last_collection_gap'))
+                          last_poll=self.store.setting('last_completed_poll'), last_gap=self.store.setting('last_collection_gap'),
+                          last_poll_seconds=None)
+        self.poll_started = None
         self.last_success = time.monotonic()
         self.has_completed_cycle = False
         self.next_backup_attempt = 0
@@ -997,14 +1073,20 @@ class Collector:
             last = self.state['last_poll'] or self.state['started_at']
             age = max(0, (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds())
             health = 'delayed' if age > 120 or self.state['collection_error'] else 'healthy' if self.has_completed_cycle else 'starting'
+            elapsed = time.monotonic() - self.poll_started if self.state['polling'] and self.poll_started is not None else 0
+            duration = max(elapsed, self.state['last_poll_seconds'] or 0)
             return {**self.state, 'network': self.network.copy(), 'poll_seconds': POLL_SECONDS, 'retention_days': retention_days,
-                    'health': health, 'seconds_since_poll': round(age), 'database_path': str(self.store.path)}
+                    'health': health, 'seconds_since_poll': round(age), 'poll_over_budget': duration >= POLL_SECONDS,
+                    'database_path': str(self.store.path)}
 
     def poll(self):
         if not self.poll_lock.acquire(blocking=False):
             return
+        started = time.monotonic()
         try:
-            self.state['polling'] = True
+            with self.state_lock:
+                self.state['polling'] = True
+                self.poll_started = started
             self.network = network_info()
             devices = [device for device in self.store.devices() if device['ip']]
             failures = 0
@@ -1035,7 +1117,10 @@ class Collector:
             self.state['collection_error'] = str(exc)
             print(f'Collection cycle failed: {exc}', flush=True)
         finally:
-            self.state['polling'] = False
+            with self.state_lock:
+                self.state['last_poll_seconds'] = round(time.monotonic() - started, 3)
+                self.state['polling'] = False
+                self.poll_started = None
             self.poll_lock.release()
 
     def start_poll(self):
@@ -1292,24 +1377,26 @@ class Handler(SimpleHTTPRequestHandler):
                 device_id = inventory_id(query['device_id'][0]) if 'device_id' in query else None
                 if ip and device_id is not None:
                     raise ValueError('Filter by either IP address or device ID.')
-                rows = self.store.history(hours, ip, chart=parsed.path == '/api/history', device_id=device_id)
+                chart = self.store.chart_history(hours, ip, device_id=device_id,
+                    metric=query.get('metric', [None])[0]) if parsed.path == '/api/history' else None
             except ValueError as exc:
                 return self.send_json({'error': str(exc)}, 400)
             if parsed.path == '/api/history':
-                held = sorted({row['metric'] for row in rows if held_metric(row['metric'])})
-                return self.send_json({'samples': rows, 'hours': hours, 'held': held,
+                held = sorted({row['metric'] for row in chart['samples'] if held_metric(row['metric'])})
+                return self.send_json({**chart, 'hours': hours, 'held': held,
                                        'heartbeat_seconds': SAMPLE_HEARTBEAT_SECONDS})
-            output = io.StringIO(newline='')
-            writer = csv.DictWriter(output, fieldnames=['ip', 'at', 'metric', 'value', 'unit', 'label', 'device_id'])
-            writer.writeheader()
-            writer.writerows({key:csv_value(value) for key,value in row.items()} for row in rows)
-            body = output.getvalue().encode('utf-8-sig')
             self.send_response(200)
             self.send_header('Content-Type', 'text/csv; charset=utf-8')
             self.send_header('Content-Disposition', 'attachment; filename="local-signal-telemetry.csv"')
-            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Connection', 'close')
+            self.close_connection = True
             self.end_headers()
-            self.wfile.write(body)
+            try:
+                with closing(self.store.csv_chunks(hours, ip, device_id=device_id)) as chunks:
+                    for chunk in chunks:
+                        self.wfile.write(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # A cancelled download must release its read snapshot.
             return
         if parsed.path.startswith('/api/'):
             return self.send_json({'error': 'Endpoint not found.'}, 404)
