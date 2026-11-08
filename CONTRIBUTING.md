@@ -59,9 +59,15 @@ For a Shelly Gen 1 device that uses the existing endpoints, add its exact `/shel
 
 [`modbus.py`](modbus.py) implements only Modbus TCP read functions 01–04; [`tests/test_modbus.py`](tests/test_modbus.py) covers fragmented TCP responses, decoding, exceptions, malformed frames, persistence, and API guards. `server.MONITOR_READERS` selects the validator and reader for each monitoring protocol. Use zero-based addresses, explicit model-specific format/units, and finite scaling. Keep each numeric value's registers in one read. After a transport or framing failure, stop using that connection for the rest of the poll; complete exception responses and invalid numeric readings may leave other points usable. Point history keys include inventory identity, unit ID, table/address, and a digest of the interpretation settings. Label edits preserve history; format, scaling, or unit changes create a new series. Modbus unit IDs are not hardware identities, and generic register readings are not automatically heating-energy sources.
 
+[`ipp.py`](ipp.py) reads only printer attributes; [`nut.py`](nut.py) reads UPS variables through an existing NUT server. [`tests/test_office_readers.py`](tests/test_office_readers.py) uses independent IPP binary fixtures over HTTP and fragmented NUT replies over TCP, then exercises collection, persistence, API guards, charts and CSV. Public and loopback device destinations stay rejected; tests redirect only the transport to their own loopback servers. [`device_io.py`](device_io.py) supplies their private-address/port validation. Both modules must remain in managed and packaged runtime lists.
+
 Keep the request set read-only and bounded. Add synthetic evidence for new object types or transport features before expanding the stated support. Follow the [commercial validation checklist](docs/commercial-devices.md#hardware-validation) before claiming a specific manufacturer/model works.
 
 For the device → collector → temporary database → HTTP/history/CSV path, use the [commercial end-to-end harness](docs/commercial-e2e.md). Install `requirements-e2e.txt` into an isolated test environment, then run `python tools/commercial_e2e.py` for local BACnet or add `--pult` to explicitly enable the fixed public Modbus demo. `--serve` keeps a disposable dashboard available for browser checks and named BACnet scenarios. The normal unit suite stays offline; the harness leaves the app's private-network restrictions unchanged.
+
+History charts use `Store.chart_history`: preserve the read-only WAL snapshot, total point budget, historical metric catalog, and explicit `points_limited` response. The frontend requests a metric/device scope, cancels stale fetches, and uses `bucket_seconds` for gap detection. CSV retains the full stored data. [`tests/test_capacity.py`](tests/test_capacity.py) covers the budget, zeroes, catalog choices, filters, snapshot consistency and concurrent collection.
+
+For repeatable synthetic capacity checks, see [capacity measurements](docs/capacity.md). These use disposable databases and mocked collection without accessing a LAN.
 
 ## Verify and submit
 
