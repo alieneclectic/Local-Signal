@@ -18,6 +18,7 @@ Local Signal is a dashboard for devices on local networks. Python serves the API
 | Firmware evidence and update alerts | [`firmware/`](firmware/), `Store.record`, `/api/state` | [`tests/test_firmware.py`](tests/test_firmware.py), [`tests/fixtures/shelly/`](tests/fixtures/shelly/) |
 | Heating energy, coverage, or cost | [`energy.py`](energy.py), `Store.energy_summary`, `/api/energy` | [`tests/test_energy.py`](tests/test_energy.py) |
 | Dashboard UI | [`web/index.html`](web/index.html), [`web/app.js`](web/app.js), [`web/style.css`](web/style.css) | API tests in [`tests/test_collector.py`](tests/test_collector.py) and a loopback browser preview |
+| Alert rules, alert history, or webhook notifications | [`alerts.py`](alerts.py), `Store.update_alerts`, `Collector.evaluate_alerts`, `/api/alerts/*` | [`tests/test_alerts.py`](tests/test_alerts.py) |
 | Backups or macOS background collection | [`reliability.py`](reliability.py), [`background.py`](background.py), [`macos/Collector.swift`](macos/Collector.swift) | [`tests/test_reliability.py`](tests/test_reliability.py) |
 
 ## Behavior to preserve

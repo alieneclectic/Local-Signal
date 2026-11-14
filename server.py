@@ -24,6 +24,7 @@ import subprocess
 import threading
 import time
 import webbrowser
+import alerts
 import coiot
 import network_names
 import media_readers
@@ -407,6 +408,7 @@ class Store:
           CREATE TABLE IF NOT EXISTS energy_readings (source_id TEXT NOT NULL, at TEXT NOT NULL,
             counter_kwh REAL NOT NULL, uptime_s REAL, PRIMARY KEY(source_id,at));
         ''')
+        self.db.executescript(alerts.SCHEMA)
         self.migrate_device_identity()
         if 'monitor_config' not in {row['name'] for row in self.db.execute('PRAGMA table_info(devices)')}:
             self.db.execute("ALTER TABLE devices ADD COLUMN monitor_config TEXT NOT NULL DEFAULT '{}'")
@@ -528,6 +530,34 @@ class Store:
         result['available_meters'] = [{'source_id': mac, 'name': d['name'], 'room': d['room']}
                                       for mac, d in energy.meter_devices(devices).items()]
         return result
+
+    def alert_settings(self, data=None):
+        with self.lock:
+            current = self.setting('alerts')
+            if data is not None:
+                current = alerts.validate_settings(data, current)
+                self.save_setting('alerts', current)
+            return alerts.settings_from(current)
+
+    def update_alerts(self):
+        """Evaluate alert rules against the stored inventory. Returns notifications to deliver."""
+        settings = self.alert_settings()
+        with self.lock, self.db:
+            devices = self.devices()
+            at = now()
+            evaluation = alerts.evaluate(devices, settings, datetime.fromisoformat(at), alerts.open_keys(self.db))
+            notes = alerts.sync(self.db, evaluation, devices, at)
+            for note in notes:
+                self.event(note['ip'], f'alert_{note["event"]}', note['text'])
+        return [note for note in notes if note['event'] == 'opened' or settings['notify_resolved']]
+
+    def alerts(self):
+        with self.lock:
+            return alerts.list_alerts(self.db, self.devices(), datetime.now(timezone.utc))
+
+    def acknowledge_alert(self, alert_id):
+        with self.lock, self.db:
+            return alerts.acknowledge(self.db, alert_id, now())
 
     def add_device(self, ip, name=None, room='Unassigned', notes='', pinned=False, expected_sleep=False, name_mode=None, monitor_config=None):
         ip = local_ip(ip)
@@ -1032,6 +1062,7 @@ class Store:
             self.db.execute('DELETE FROM samples WHERE at<?', (cutoff,))
             self.db.execute('DELETE FROM text_samples WHERE at<?', (cutoff,))
             self.db.execute('DELETE FROM energy_readings WHERE at<?', (cutoff,))
+            alerts.cleanup(self.db, cutoff)
             self.db.execute('DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT 1000)')
             self.db.commit()
 
@@ -1040,6 +1071,7 @@ class Collector:
     def __init__(self, store):
         self.firmware_catalog_locks = {source: threading.Lock() for source in FIRMWARE_CATALOGS}
         self.store = store
+        self.notifier = alerts.Notifier(store.path)
         self.router_monitors = [routers.Monitor(store.path, adapter_id, adapter)
                                 for adapter_id, adapter in routers.ADAPTERS.items()]
         self.network = network_info()
@@ -1054,7 +1086,7 @@ class Collector:
         self.state.update(naming=False, last_name_discovery=None, names_found=0, name_discovery_errors=[])
         self.state.update(collection_error=None, background=False, backup=self.store.setting('backup'), backup_error=None,
                           last_poll=self.store.setting('last_completed_poll'), last_gap=self.store.setting('last_collection_gap'),
-                          last_poll_seconds=None)
+                          last_poll_seconds=None, alert_error=None)
         self.poll_started = None
         self.last_success = time.monotonic()
         self.has_completed_cycle = False
@@ -1113,6 +1145,7 @@ class Collector:
             self.state.update(last_poll=completed, collection_error=None)
             self.has_completed_cycle = True
             self.last_success = time.monotonic()
+            self.evaluate_alerts()  # Rules need statuses from a completed cycle, not from before a restart.
         except Exception as exc:
             self.state['collection_error'] = str(exc)
             print(f'Collection cycle failed: {exc}', flush=True)
@@ -1125,6 +1158,17 @@ class Collector:
 
     def start_poll(self):
         threading.Thread(target=self.poll, daemon=True).start()
+
+    def evaluate_alerts(self):
+        if not self.has_completed_cycle:
+            return
+        try:
+            self.notifier.enqueue(self.store.update_alerts())
+            self.state['alert_error'] = None
+        except (sqlite3.Error, ValueError, TypeError, KeyError) as exc:
+            # An alert problem is reported separately and never fails device collection.
+            self.state['alert_error'] = str(exc)[:200]
+            print(f'Alert evaluation failed: {exc}', flush=True)
 
     def listen_sensors(self):
         def received(ip, report):
@@ -1274,6 +1318,19 @@ class Handler(SimpleHTTPRequestHandler):
         except ValueError:
             return False
 
+    def loopback_client(self):
+        return self.client_address[0] == '127.0.0.1'
+
+    def alert_state(self):
+        try:
+            config = alerts.load_webhook(self.store.path)
+            webhook = {'configured': bool(config), 'format': config and config['format'],
+                       'destination': config and alerts.destination(config['url']), 'error': None}
+        except alerts.WebhookError as exc:
+            webhook = {'configured': False, 'format': None, 'destination': None, 'error': str(exc)}
+        webhook.update(self.collector.notifier.snapshot(), editable=self.loopback_client())
+        return {**self.store.alerts(), 'settings': self.store.alert_settings(), 'webhook': webhook}
+
     def send_json(self, data, code=200):
         body = json.dumps(data, allow_nan=False).encode()
         self.send_response(code)
@@ -1330,7 +1387,8 @@ class Handler(SimpleHTTPRequestHandler):
                 else:
                     row['stable_status'] = 'unverified'
             data = {'devices': devices, 'rooms': self.store.rooms(), 'collector': self.collector.snapshot(),
-                    'events': events, 'firmware': firmware, 'firmware_events': firmware_events}
+                    'events': events, 'firmware': firmware, 'firmware_events': firmware_events,
+                    'alerts': self.alert_state()}
             if self.client_address[0] == '127.0.0.1':
                 data['router_monitoring'] = [monitor.snapshot() for monitor in self.collector.router_monitors]
             if DEV_RELOAD:
@@ -1441,6 +1499,33 @@ class Handler(SimpleHTTPRequestHandler):
                             print(f'Could not reclaim space after shortening history: {exc}', flush=True)
                     threading.Thread(target=shorten, daemon=True).start()
                 return self.send_json({'ok': True})
+            if self.path == '/api/alerts/settings':
+                self.store.alert_settings(data)
+                self.collector.evaluate_alerts()
+                return self.send_json({'ok': True, 'alerts': self.alert_state()})
+            alert_match = re.fullmatch(r'/api/alerts/([0-9]{1,19})/acknowledge', self.path)
+            if alert_match:
+                if data:
+                    raise ValueError('Acknowledging an alert takes no properties.')
+                if not self.store.acknowledge_alert(inventory_id(alert_match[1])):
+                    return self.send_json({'error': 'That alert is no longer open.'}, 404)
+                return self.send_json({'ok': True})
+            if self.path in ('/api/alerts/webhook', '/api/alerts/webhook/test'):
+                if not self.loopback_client():
+                    return self.send_json({'error': 'Change notification delivery from the collector computer.'}, 403)
+                if self.path.endswith('/test'):
+                    if data:
+                        raise ValueError('Sending a test takes no properties.')
+                    try:
+                        if not self.collector.notifier.deliver(alerts.TEST_NOTE):
+                            raise ValueError('Save a webhook before sending a test.')
+                    except alerts.WebhookError as exc:
+                        return self.send_json({'error': str(exc)}, 502)
+                    return self.send_json({'ok': True})
+                if set(data) - {'url', 'format'} or 'url' not in data:
+                    raise ValueError('Provide a webhook URL and format, or a null URL to remove it.')
+                alerts.save_webhook(self.store.path, data['url'], data.get('format', 'ntfy'))
+                return self.send_json({'ok': True, 'alerts': self.alert_state()})
             if self.path == '/api/refresh':
                 self.collector.start_poll()
                 return self.send_json({'ok': True}, 202)
@@ -1600,6 +1685,7 @@ def main(argv=None, *, default_data=ROOT / '.data' / 'hearth.sqlite3', open_brow
         if not args.no_collector:
             threading.Thread(target=collector.listen_sensors, daemon=True).start()
             threading.Thread(target=collector.run, daemon=True).start()
+            threading.Thread(target=collector.notifier.run, args=(collector.stop,), daemon=True).start()
             for monitor in collector.router_monitors:
                 threading.Thread(target=monitor.run, args=(collector.stop,), daemon=True).start()
             if args.background:

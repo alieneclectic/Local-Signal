@@ -286,3 +286,32 @@
 .modbus-numeric { display: grid; gap: 12px; min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 7px; margin: 0; }
 .modbus-numeric[hidden], .modbus-bit-note[hidden] { display: none; }
 @media (max-width: 530px) { .modbus-point .form-row { grid-template-columns: minmax(0, 1fr); } .modbus-numeric { padding: 8px; } }
+
+/* Alerts */
+.alert-notice strong { font-weight: 600; }
+.alerts-panel { margin-bottom: 26px; }
+.alert-list { padding: 0 23px 8px; }
+.alert-row { display: grid; grid-template-columns: 74px minmax(0, 1fr) auto; gap: 14px; align-items: center; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.alert-row:last-child { border-bottom: 0; }
+.alert-row .status-badge { justify-self: start; }
+.alert-row.resolved .status-badge { opacity: .6; }
+.alert-text p { font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.alert-text small, .alert-meta { color: var(--muted); font-size: 10px; }
+.alert-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; white-space: nowrap; }
+.alert-form { display: grid; gap: 4px; padding: 4px 23px 12px; }
+.alert-form > label:not(.check-label) { margin-bottom: 12px; }
+.alert-form select { width: 100%; max-width: none; padding: 11px; border: 1px solid var(--line); border-radius: 7px; background: var(--paper); color: var(--ink); }
+.alert-rule { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 10px 16px; padding: 10px 0 14px; border-bottom: 1px solid var(--line); }
+.alert-rule .check-label { align-items: flex-start; flex: 1 1 220px; }
+.alert-rule .check-label input { margin-top: 3px; }
+.alert-rule .check-label span { display: grid; gap: 2px; }
+.alert-rule .check-label strong { color: var(--ink); font-weight: 500; font-size: 11px; }
+.alert-form > .check-label { margin: 12px 0 6px; }
+.alert-threshold { display: inline-flex; align-items: center; gap: 7px; font-size: 10px; color: var(--muted); white-space: nowrap; }
+.alert-threshold input { width: 72px; padding: 8px 9px; }
+.form-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+@media (max-width: 530px) {
+  .alert-list, .alert-form { padding-left: 17px; padding-right: 17px; }
+  .alert-row { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .alert-meta { flex-direction: row; align-items: center; gap: 12px; }
+}
