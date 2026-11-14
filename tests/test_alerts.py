@@ -174,6 +174,135 @@ class RuleTests(unittest.TestCase):
         self.assertEqual(alerts.settings_from({'device_offline': {'minutes': -5, 'enabled': 'no'}}), DEFAULTS)
 
 
+def sensor(device_id=1, value=21.0, minutes_ago=0, **values):
+    reading = {'value': value, 'unit': '°C', 'label': 'Temperature', 'reported_at': ago(minutes_ago)}
+    return device(device_id, latest_metrics={'temperature_c': reading}, **values)
+
+
+def custom_settings(**rule):
+    rule = {'device_id': 1, 'metric': 'temperature_c', 'op': 'below', 'value': 10, 'minutes': 15, **rule}
+    return alerts.validate_settings({'custom': [rule]}, DEFAULTS, [sensor(rule['device_id'])])
+
+
+class CustomRuleTests(unittest.TestCase):
+    def run_at(self, ledger, devices, settings, minutes, tracker):
+        at = AT + timedelta(minutes=minutes)
+        evaluation = alerts.evaluate(devices, settings, at, alerts.open_keys(ledger.db), tracker)
+        return alerts.sync(ledger.db, evaluation, devices, at.isoformat(timespec='seconds'), settings)
+
+    def reading(self, value, minutes):
+        """A sensor whose latest reading arrived at AT + minutes."""
+        stamp = (AT + timedelta(minutes=minutes)).isoformat(timespec='seconds')
+        return [device(latest_metrics={'temperature_c': {'value': value, 'unit': '°C', 'label': 'Temperature',
+                                                         'reported_at': stamp}})]
+
+    def test_validation_assigns_ids_and_takes_label_and_unit_from_the_device(self):
+        settings = custom_settings(name='  Pipes could freeze ', severity='critical')
+        rule, = settings['custom']
+        self.assertRegex(rule['id'], r'^[0-9a-f]{8}$')
+        self.assertEqual((rule['label'], rule['unit'], rule['name'], rule['value']), ('Temperature', '°C', 'Pipes could freeze', 10.0))
+        self.assertEqual(alerts.settings_from(settings)['custom'], [rule])
+        # Editing keeps the id; an unknown id is rejected rather than silently creating a rule.
+        edited = alerts.validate_settings({'custom': [{**rule, 'value': 5}]}, settings, [sensor()])
+        self.assertEqual((edited['custom'][0]['id'], edited['custom'][0]['value']), (rule['id'], 5.0))
+        with self.assertRaisesRegex(ValueError, 'no longer exists'):
+            alerts.validate_settings({'custom': [{**rule, 'id': 'ffffffff'}]}, settings, [sensor()])
+
+    def test_validation_rejects_bad_rules(self):
+        base = {'device_id': 1, 'metric': 'temperature_c', 'op': 'below', 'value': 10}
+        for bad in ({**base, 'device_id': 2}, {**base, 'device_id': True}, {**base, 'metric': 'humidity_pct'},
+                    {**base, 'op': 'equals'}, {**base, 'value': float('nan')}, {**base, 'value': True},
+                    {**base, 'value': 2e9}, {**base, 'minutes': 1441}, {**base, 'minutes': 1.5},
+                    {**base, 'severity': 'urgent'}, {**base, 'name': 'x' * 81}, {**base, 'extra': 1}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                alerts.validate_settings({'custom': [bad]}, DEFAULTS, [sensor()])
+        with self.assertRaises(ValueError):
+            alerts.validate_settings({'custom': [base] * 26}, DEFAULTS, [sensor()])
+        damaged = {'custom': [{'id': 'nope'}, *custom_settings()['custom']]}
+        self.assertEqual(len(alerts.settings_from(damaged)['custom']), 1)
+
+    def test_condition_must_hold_for_the_duration_before_opening_and_clearing(self):
+        settings, ledger, tracker = custom_settings(), Ledger(), {}
+        self.assertEqual(self.run_at(ledger, self.reading(8, 0), settings, 0, tracker), [])
+        self.assertEqual(self.run_at(ledger, self.reading(8.5, 10), settings, 10, tracker), [])
+        notes = self.run_at(ledger, self.reading(8.4, 15), settings, 15, tracker)
+        self.assertEqual([(n['event'], n['title'], n['summary']) for n in notes], [
+            ('opened', 'Temperature below 10 °C (50 °F)', 'Temperature is 8.4 °C (47.1 °F), below the 10 °C (50 °F) limit.')])
+        self.assertEqual(notes[0]['severity'], 'warning')
+        # A brief recovery doesn't clear it; the reading must stay clear for the same 15 minutes.
+        self.assertEqual(self.run_at(ledger, self.reading(11, 20), settings, 20, tracker), [])
+        self.assertEqual(self.run_at(ledger, self.reading(9, 25), settings, 25, tracker), [])
+        self.assertEqual(ledger.open()[0]['summary'], 'Temperature is 9 °C (48.2 °F), below the 10 °C (50 °F) limit.')
+        self.assertEqual(self.run_at(ledger, self.reading(12, 30), settings, 30, tracker), [])
+        notes = self.run_at(ledger, self.reading(12, 45), settings, 45, tracker)
+        self.assertEqual([(n['event'], n['text']) for n in notes],
+                         [('resolved', 'Device 1: Temperature below 10 °C (50 °F) has cleared.')])
+
+    def test_zero_minutes_opens_immediately_and_stale_readings_are_unknown(self):
+        settings, ledger, tracker = custom_settings(minutes=0, op='above', value=30, name='Too hot'), Ledger(), {}
+        notes = self.run_at(ledger, self.reading(31, 0), settings, 0, tracker)
+        self.assertEqual([(n['title'], n['text']) for n in notes],
+                         [('Too hot', 'Device 1: Temperature is 31 °C (87.8 °F), above the 30 °C (86 °F) limit.')])
+        # Forty minutes without a new reading: stale for an awake device, so the alert stays open.
+        self.assertEqual(self.run_at(ledger, self.reading(25, 0), settings, 40, tracker), [])
+        self.assertEqual(len(ledger.open()), 1)
+        sleeping = [{**self.reading(25, 0)[0], 'expected_sleep': True}]
+        self.assertEqual([n['event'] for n in self.run_at(ledger, sleeping, settings, 40, tracker)], ['resolved'])
+
+    def test_deleting_disabling_or_removing_the_device_resolves_quietly(self):
+        settings, ledger = custom_settings(minutes=0), Ledger()
+        rule = settings['custom'][0]
+        for change in ({'custom': []}, {'custom': [{**rule, 'enabled': False}]}):
+            self.run_at(ledger, self.reading(5, 0), settings, 0, {})
+            self.assertEqual(len(ledger.open()), 1)
+            updated = alerts.validate_settings(change, settings, [sensor()])
+            self.assertEqual(self.run_at(ledger, self.reading(5, 0), updated, 0, {}), [])
+            self.assertEqual(ledger.open(), [])
+        self.run_at(ledger, self.reading(5, 0), settings, 0, {})
+        self.assertEqual(self.run_at(ledger, [], settings, 0, {}), [])
+        self.assertEqual(ledger.open(), [])
+
+    def test_two_rules_on_one_device_are_independent_and_severity_follows_the_rule(self):
+        cold = {'device_id': 1, 'metric': 'temperature_c', 'op': 'below', 'value': 10, 'minutes': 0, 'severity': 'critical'}
+        cool = {**cold, 'value': 15, 'severity': 'info'}
+        settings = alerts.validate_settings({'custom': [cold, cool]}, DEFAULTS, [sensor()])
+        ledger = Ledger()
+        notes = self.run_at(ledger, self.reading(12, 0), settings, 0, {})
+        self.assertEqual([n['severity'] for n in notes], ['info'])
+        notes = self.run_at(ledger, self.reading(8, 1), settings, 1, {})
+        self.assertEqual([n['severity'] for n in notes], ['critical'])
+        self.assertEqual(len(ledger.open()), 2)
+        self.assertEqual({a['title'] for a in alerts.list_alerts(ledger.db, [device()], AT, settings)['open']},
+                         {'Temperature below 10 °C (50 °F)', 'Temperature below 15 °C (59 °F)'})
+
+    def test_tracker_forgets_deleted_rules(self):
+        settings, tracker = custom_settings(), {}
+        alerts.evaluate(self.reading(5, 0), settings, AT, set(), tracker)
+        self.assertEqual(len(tracker), 1)
+        alerts.evaluate(self.reading(5, 0), DEFAULTS, AT, set(), tracker)
+        self.assertEqual(tracker, {})
+
+    def test_store_rules_survive_restart_and_reject_unreported_readings(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = server.Store(Path(folder) / 'custom.sqlite3')
+            self.addCleanup(store.db.close)
+            store.add_device('10.23.0.60', 'Garage sensor', pinned=True)
+            device_id = store.devices()[0]['device_id']
+            with self.assertRaisesRegex(ValueError, 'numeric reading'):
+                store.alert_settings({'custom': [{'device_id': device_id, 'metric': 'temperature_c', 'op': 'below', 'value': 4}]})
+            store.record('10.23.0.60', {'status': 'online', 'reachable': True, 'checked_at': server.now(),
+                                         'metrics': {'temperature_c': {'value': 2.5, 'unit': '°C', 'label': 'Temperature'}}})
+            store.alert_settings({'custom': [{'device_id': device_id, 'metric': 'temperature_c', 'op': 'below',
+                                              'value': 4, 'minutes': 0, 'name': 'Garage freezing'}]})
+            notes = store.update_alerts()
+            self.assertEqual([(n['title'], n['text']) for n in notes],
+                             [('Garage freezing', 'Garage sensor: Temperature is 2.5 °C (36.5 °F), below the 4 °C (39.2 °F) limit.')])
+            self.assertEqual(store.alerts()['open'][0]['title'], 'Garage freezing')
+            reopened = server.Store(store.path)
+            self.addCleanup(reopened.db.close)
+            self.assertEqual(reopened.alert_settings()['custom'], store.alert_settings()['custom'])
+
+
 class Capture(BaseHTTPRequestHandler):
     def do_POST(self):
         body = self.rfile.read(int(self.headers['Content-Length']))

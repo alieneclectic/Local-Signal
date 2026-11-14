@@ -13,6 +13,7 @@ import json
 import os
 import queue
 import re
+import secrets
 import stat
 import tempfile
 import threading
@@ -37,8 +38,16 @@ DEFAULT_SETTINGS = {
     'printer_supply': {'enabled': True, 'pct': 10},
     'sensor_battery': {'enabled': True, 'pct': 20},
     'notify_resolved': True,
+    'custom': [],
 }
 LIMITS = {'minutes': (2, 1440), 'pct': (1, 99)}
+MAX_CUSTOM_RULES = 25
+CUSTOM_FIELDS = ('id', 'enabled', 'name', 'device_id', 'metric', 'label', 'unit', 'op', 'value', 'minutes', 'severity')
+CUSTOM_OPERATORS = ('below', 'above')
+SEVERITIES = ('info', 'warning', 'critical')
+# A custom rule only judges readings this recent. Older readings are unknown, not a recovery.
+FRESH_SECONDS = 30 * 60
+SLEEPING_FRESH_SECONDS = 12 * 3600
 # Rule -> (settings group, severity, title, phrase used when it clears).
 RULES = {
     'device_offline': ('device_offline', 'warning', 'Device stopped responding', 'is responding again'),
@@ -48,6 +57,7 @@ RULES = {
     'ups_replace_battery': ('ups_battery', 'warning', 'UPS battery needs replacement', 'no longer reports a battery replacement'),
     'printer_supply_low': ('printer_supply', 'info', 'Printer supply low', 'supply level has recovered'),
     'sensor_battery_low': ('sensor_battery', 'warning', 'Sensor battery low', 'battery level has recovered'),
+    'custom': ('custom', 'warning', 'Custom alert', 'is back within its limit'),
 }
 REACHABLE = ('online', 'reachable', 'auth_required')
 SUPPLY_METRIC = re.compile(r'ipp_supply_\d+_[0-9a-f]{8}_pct')
@@ -78,6 +88,14 @@ def settings_from(stored):
             if isinstance(saved, bool):
                 result[group] = saved
             continue
+        if group == 'custom':
+            if isinstance(saved, list):
+                for item in saved[:MAX_CUSTOM_RULES]:
+                    try:
+                        result['custom'].append(custom_rule(item))
+                    except ValueError:
+                        continue  # Skip a damaged rule rather than losing the others.
+            continue
         if not isinstance(saved, dict):
             continue
         if isinstance(saved.get('enabled'), bool):
@@ -89,13 +107,78 @@ def settings_from(stored):
     return result
 
 
-def validate_settings(data, current):
+def custom_rule(item):
+    """Return a complete, normalized custom rule or raise ValueError."""
+    if not isinstance(item, dict) or set(item) != set(CUSTOM_FIELDS):
+        raise ValueError('Custom rules need a device, reading, condition, limit and duration.')
+    if not isinstance(item['id'], str) or not re.fullmatch(r'[0-9a-f]{8}', item['id']):
+        raise ValueError('Unknown custom rule.')
+    if not isinstance(item['enabled'], bool):
+        raise ValueError('enabled must be true or false.')
+    for field, limit in (('name', 80), ('label', 80), ('unit', 20)):
+        value = item[field]
+        if not isinstance(value, str) or len(value) > limit or re.search(r'[\x00-\x1f\x7f]', value):
+            raise ValueError(f'Use a {field} of up to {limit} characters.')
+    device_id = item['device_id']
+    if isinstance(device_id, bool) or not isinstance(device_id, int) or not 0 < device_id <= 2**63 - 1:
+        raise ValueError('Choose a device from your inventory.')
+    metric = item['metric']
+    if not isinstance(metric, str) or not 1 <= len(metric) <= 200 or re.search(r'[\x00-\x1f\x7f]', metric):
+        raise ValueError('Choose a reading from the device.')
+    if item['op'] not in CUSTOM_OPERATORS:
+        raise ValueError('Choose below or above.')
+    if not number(item['value']) or abs(item['value']) > 1e9:
+        raise ValueError('Enter a limit between -1,000,000,000 and 1,000,000,000.')
+    minutes = item['minutes']
+    if isinstance(minutes, bool) or not isinstance(minutes, int) or not 0 <= minutes <= 1440:
+        raise ValueError('Choose 0–1440 minutes.')
+    if item['severity'] not in SEVERITIES:
+        raise ValueError('Choose info, warning or critical.')
+    return {**{field: item[field] for field in CUSTOM_FIELDS}, 'name': item['name'].strip(), 'value': float(item['value'])}
+
+
+def _custom_rules(update, previous, devices):
+    """Validate the dashboard's full custom rule list. Label and unit come from the device's own reading."""
+    if not isinstance(update, list) or len(update) > MAX_CUSTOM_RULES:
+        raise ValueError(f'Add up to {MAX_CUSTOM_RULES} custom rules.')
+    previous = {rule['id']: rule for rule in previous}
+    by_id = {device['device_id']: device for device in devices}
+    rules, seen = [], set()
+    for item in update:
+        if not isinstance(item, dict) or set(item) - set(CUSTOM_FIELDS):
+            raise ValueError('Unexpected custom rule properties.')
+        item = {'enabled': True, 'name': '', 'minutes': 0, 'severity': 'warning', **item}
+        if 'id' in item and item['id'] not in previous:
+            raise ValueError('That custom rule no longer exists. Reload the page.')
+        rule_id = item.get('id') or secrets.token_hex(4)
+        if rule_id in seen:
+            raise ValueError('Each custom rule can appear once.')
+        seen.add(rule_id)
+        device = by_id.get(item.get('device_id')) if type(item.get('device_id')) is int else None
+        if device is None:
+            raise ValueError('Choose a device from your inventory.')
+        reading = (device.get('latest_metrics') or {}).get(item.get('metric'))
+        old = previous.get(rule_id)
+        if reading and number(reading.get('value')):
+            label, unit = str(reading.get('label') or item['metric'])[:80], str(reading.get('unit') or '')[:20]
+        elif old and (old['device_id'], old['metric']) == (item['device_id'], item.get('metric')):
+            label, unit = old['label'], old['unit']  # A rule keeps working while its device is quiet.
+        else:
+            raise ValueError('Choose a numeric reading this device has reported.')
+        rules.append(custom_rule({**item, 'id': rule_id, 'label': label, 'unit': unit}))
+    return rules
+
+
+def validate_settings(data, current, devices=()):
     """Apply a partial settings update strictly. Raises ValueError with a message for the dashboard."""
     if not isinstance(data, dict) or not data or set(data) - set(DEFAULT_SETTINGS):
         raise ValueError('Unexpected alert settings.')
     result = settings_from(current)
     for group, update in data.items():
         defaults = DEFAULT_SETTINGS[group]
+        if group == 'custom':
+            result['custom'] = _custom_rules(update, result['custom'], devices)
+            continue
         if isinstance(defaults, bool):
             if not isinstance(update, bool):
                 raise ValueError(f'{group} must be true or false.')
@@ -125,12 +208,71 @@ def _age_seconds(value, at):
     return max(0.0, (at - stamp).total_seconds())
 
 
+def quantity(value, unit):
+    text = f'{value:.1f}'.rstrip('0').rstrip('.')
+    text = '0' if text == '-0' else text
+    text = f'{text} {unit}' if unit else text
+    if unit == '°C':
+        text += f' ({quantity(value * 9 / 5 + 32, "°F")})'
+    return text
+
+
+def custom_title(rule):
+    return rule['name'] or f'{rule["label"]} {rule["op"]} {quantity(rule["value"], rule["unit"])}'
+
+
+def title_for(rule, subject, settings):
+    if rule == 'custom':
+        custom = next((item for item in (settings or {}).get('custom', []) if item['id'] == subject), None)
+        return custom_title(custom) if custom else 'Custom alert'
+    return RULES.get(rule, ('', '', 'Alert', ''))[2]
+
+
+def _evaluate_custom(devices, settings, at, open_keys, tracker, active, cleared, scope):
+    """Custom rules must hold for their duration before opening, and be clear as long before clearing.
+
+    tracker maps a rule's key to (breaching, since, limit): when the latest fresh reading entered
+    its current state. It lives in memory, so a restart waits a full duration again.
+    """
+    by_id = {device['device_id']: device for device in devices}
+    live = set()
+    for rule in settings.get('custom', []):
+        device = by_id.get(rule['device_id'])
+        if not rule['enabled'] or device is None:
+            continue
+        key = ('custom', rule['device_id'], rule['id'])
+        live.add(key)
+        scope.add(key)
+        reading = (device.get('latest_metrics') or {}).get(rule['metric']) or {}
+        value, reported = reading.get('value'), reading.get('reported_at')
+        age = _age_seconds(reported, at)
+        fresh_for = SLEEPING_FRESH_SECONDS if device.get('expected_sleep') else FRESH_SECONDS
+        if not number(value) or age is None or age > fresh_for:
+            continue  # Unknown: leave any open alert and the timer as they are.
+        breaching = value < rule['value'] if rule['op'] == 'below' else value > rule['value']
+        limit = (rule['op'], rule['value'])
+        state = tracker.get(key)
+        if state is None or state[0] != breaching or state[2] != limit:
+            state = tracker[key] = (breaching, reported, limit)
+        held = (_age_seconds(state[1], at) or 0) >= rule['minutes'] * 60
+        if breaching and (held or key in open_keys):
+            relation = 'below' if rule['op'] == 'below' else 'above'
+            active[key] = {'severity': rule['severity'], 'summary':
+                           f'{rule["label"]} is {quantity(value, rule["unit"])}, {relation} the '
+                           f'{quantity(rule["value"], rule["unit"])} limit.'}
+        elif not breaching and key in open_keys and held:
+            cleared.add(key)
+    for key in list(tracker):
+        if key not in live:
+            del tracker[key]
+
+
 def _ups_flags(metrics):
     state = metrics.get('ups_state', {}).get('value')
     return set(state.split(' · ')) if isinstance(state, str) and state else None
 
 
-def evaluate(devices, settings, at, open_keys=frozenset()):
+def evaluate(devices, settings, at, open_keys=frozenset(), tracker=None):
     """Return (active, cleared, scope) for the current device inventory.
 
     active maps (rule, device_id, subject) to {'summary': text} for conditions observed now.
@@ -212,6 +354,7 @@ def evaluate(devices, settings, at, open_keys=frozenset()):
                     active[key] = {'summary': f'Battery is at {battery["value"]:.0f}%.'}
                 else:
                     cleared.add(key)
+    _evaluate_custom(devices, settings, at, open_keys, {} if tracker is None else tracker, active, cleared, scope)
     return active, cleared, scope
 
 
@@ -220,25 +363,28 @@ def open_keys(db):
         'SELECT rule, device_id, subject FROM alerts WHERE resolved_at IS NULL')}
 
 
-def _notification(event, row, device, at):
+def _notification(event, row, device, at, settings):
     rule = row['rule']
-    _, severity, title, cleared_phrase = RULES.get(rule, ('', row['severity'], 'Alert', 'has cleared'))
+    cleared_phrase = RULES.get(rule, ('', '', '', 'has cleared'))[3]
+    title = title_for(rule, row['subject'], settings)
     name = device['name'] if device else 'A removed device'
     if event == 'opened':
         text = f'{name}: {row["summary"]}'
+    elif rule == 'custom':
+        text = f'{name}: {title} has cleared.'
     else:
         text = f'{name} {cleared_phrase}.'
-    return {'event': event, 'id': row['id'], 'rule': rule, 'severity': severity, 'title': title, 'text': text,
+    return {'event': event, 'id': row['id'], 'rule': rule, 'severity': row['severity'], 'title': title, 'text': text,
             'summary': row['summary'], 'device': {'name': name, 'room': device['room'] if device else None},
             'ip': device.get('ip') if device else None, 'opened_at': row['opened_at'],
             'resolved_at': at if event == 'resolved' else None}
 
 
-def sync(db, evaluation, devices, at):
+def sync(db, evaluation, devices, at, settings=None):
     """Open, update and resolve alert rows inside the caller's transaction.
 
     Returns notifications for alerts that opened or cleared. Alerts whose rule was turned
-    off, whose device left the rule's scope, or whose device was removed resolve quietly.
+    off or deleted, whose device left the rule's scope, or whose device was removed resolve quietly.
     """
     active, cleared, scope = evaluation
     by_id = {device['device_id']: device for device in devices}
@@ -247,36 +393,37 @@ def sync(db, evaluation, devices, at):
     notes = []
     for key, info in sorted(active.items()):
         rule, device_id, subject = key
+        severity = info.get('severity') or RULES[rule][1]
         if key in rows:
-            if rows[key]['summary'] != info['summary']:
-                db.execute('UPDATE alerts SET summary=?, updated_at=? WHERE id=?', (info['summary'], at, rows[key]['id']))
+            if (rows[key]['summary'], rows[key]['severity']) != (info['summary'], severity):
+                db.execute('UPDATE alerts SET summary=?, severity=?, updated_at=? WHERE id=?',
+                           (info['summary'], severity, at, rows[key]['id']))
             continue
-        severity = RULES[rule][1]
         alert_id = db.execute('''INSERT INTO alerts(rule, device_id, subject, severity, summary, opened_at, updated_at)
                                  VALUES(?,?,?,?,?,?,?)''', (rule, device_id, subject, severity, info['summary'], at, at)).lastrowid
         row = {'id': alert_id, 'rule': rule, 'device_id': device_id, 'subject': subject, 'severity': severity,
                'summary': info['summary'], 'opened_at': at}
-        notes.append(_notification('opened', row, by_id.get(device_id), at))
+        notes.append(_notification('opened', row, by_id.get(device_id), at, settings))
     for key, row in rows.items():
         if key in active:
             continue
         rule, device_id, _ = key
         if key in cleared:
             db.execute('UPDATE alerts SET resolved_at=?, updated_at=? WHERE id=?', (at, at, row['id']))
-            notes.append(_notification('resolved', row, by_id.get(device_id), at))
-        elif (rule, device_id) not in scope:
+            notes.append(_notification('resolved', row, by_id.get(device_id), at, settings))
+        elif (rule, device_id) not in scope and key not in scope:  # Custom rules are scoped per rule.
             db.execute('UPDATE alerts SET resolved_at=?, updated_at=? WHERE id=?', (at, at, row['id']))
     return notes
 
 
-def list_alerts(db, devices, at):
+def list_alerts(db, devices, at, settings=None):
     by_id = {device['device_id']: device for device in devices}
     since = datetime.fromtimestamp(at.timestamp() - RESOLVED_HISTORY_DAYS * 86400, timezone.utc).isoformat(timespec='seconds')
 
     def shape(row):
         item = dict(row)
         device = by_id.get(item['device_id'])
-        item['title'] = RULES.get(item['rule'], ('', '', 'Alert', ''))[2]
+        item['title'] = title_for(item['rule'], item['subject'], settings)
         item['device_name'] = device['name'] if device else 'Removed device'
         item['room'] = device['room'] if device else None
         return item

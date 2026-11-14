@@ -315,3 +315,14 @@
   .alert-row { grid-template-columns: minmax(0, 1fr); gap: 6px; }
   .alert-meta { flex-direction: row; align-items: center; gap: 12px; }
 }
+.custom-rule-row { display: grid; grid-template-columns: auto minmax(0, 1fr) 74px auto; gap: 14px; align-items: center; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.custom-rule-row:last-child { border-bottom: 0; }
+.custom-rule-row input[type=checkbox] { accent-color: var(--green); width: 14px; height: 14px; margin: 0; }
+.custom-rule-row.disabled .alert-text, .custom-rule-row.disabled .status-badge { opacity: .5; }
+.custom-rule-form { border-top: 1px solid var(--line); padding-top: 18px; }
+.custom-rule-form .form-row > label { min-width: 0; }
+@media (max-width: 530px) {
+  .custom-rule-row { grid-template-columns: auto minmax(0, 1fr); }
+  .custom-rule-row .status-badge, .custom-rule-row .text-button { grid-column: 2; justify-self: start; }
+  .custom-rule-form .form-row { grid-template-columns: minmax(0, 1fr); gap: 0; }
+}

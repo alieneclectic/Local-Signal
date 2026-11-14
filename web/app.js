@@ -42,7 +42,7 @@ hydrateIcons();
 const state = {devices:[], firmware:[], firmware_events:[], alerts:{open:[], recent:[], settings:{}, webhook:{}}, collector:{network:{}}, events:[], samples:[], historyMetrics:[], historyDevice:'', page:'overview', filter:'all', query:'', range:24, metric:'latency_ms', connected:false, initial:true, unit:localStorage.getItem('hearth-unit') || 'F', chartDevices:new Set(), lastHistory:null, historyError:null};
 const colors = ['#2e6a51','#9eac58','#d09460','#7895b0','#9b86ae','#c17e85','#528f90','#b5a384']
  .map((color, i) => `var(--chart-series-${i+1}, ${color})`);
-let loading = false, toastTimer, detailDeviceId = null, historyController = null, historyRequest = 0;
+let loading = false, alertsSavedAt = 0, toastTimer, detailDeviceId = null, historyController = null, historyRequest = 0;
 const openDeviceCards = new Set();
 const deviceFilters = [
  ['all','All devices'], ['saved','My devices'], ['switch','Switches'], ['sensor','Sensors'],
@@ -101,7 +101,9 @@ async function api(path, options={}) {
 async function load(force=false) {
  if(loading) return; loading=true;
  try {
-  const data=await api('/api/state');
+  const requestedAt=Date.now(), data=await api('/api/state');
+  // A poll that started before an alert save would otherwise briefly restore the old rules.
+  if(requestedAt<=alertsSavedAt) data.alerts=state.alerts;
   if(state.dev_revision && data.dev_revision && state.dev_revision!==data.dev_revision) {
    location.reload();
    return;
@@ -658,6 +660,60 @@ function webhookPanel(hook) {
  ${status}${problem?`<div class="notice warning">${icon('info')}${esc(problem)}</div>`:''}${form}
  <p class="collection-note">Notifications contain device names, rooms and alert text, never IP or MAC addresses. The URL is saved in a private file next to the database and isn’t shown again. Plain http:// is allowed only for private addresses.</p></section>`;
 }
+// Custom rules store limits in the reading's own unit; temperatures follow the °C/°F display choice.
+const fahrenheit = unit => unit==='°C' && state.unit==='F';
+const displayUnit = unit => fahrenheit(unit) ? '°F' : unit;
+const toDisplay = (value, unit) => fahrenheit(unit) ? Math.round((value*9/5+32)*100)/100 : value;
+// Four decimals so a limit entered in °F shows the same °F value again (40 °F, not 39.99 °F).
+const fromDisplay = (value, unit) => fahrenheit(unit) ? Math.round((value-32)*5/9*10000)/10000 : value;
+const numericReadings = device => Object.entries(device.latest_metrics || {})
+ .filter(([, reading]) => Number.isFinite(reading?.value) && typeof reading.value!=='boolean')
+ .sort(([, a], [, b]) => String(a.label).localeCompare(String(b.label)));
+function customRuleText(rule) {
+ const limit = `${fmt(toDisplay(rule.value, rule.unit), 2)}${rule.unit?` ${esc(displayUnit(rule.unit))}`:''}`;
+ return `${esc(rule.label)} ${rule.op} ${limit}`;
+}
+function customRuleRow(rule) {
+ const device = state.devices.find(d=>d.device_id===rule.device_id);
+ const reading = device?.latest_metrics?.[rule.metric];
+ const duration = rule.minutes ? `for ${rule.minutes} min` : 'immediately';
+ return `<div class="custom-rule-row ${rule.enabled?'':'disabled'}">
+  <input type="checkbox" data-custom-toggle="${esc(rule.id)}" ${rule.enabled?'checked':''} aria-label="Turn ${esc(rule.name || rule.label)} rule ${rule.enabled?'off':'on'}">
+  <div class="alert-text"><p><strong>${esc(device?.name || 'Removed device')}</strong> · ${rule.name ? esc(rule.name) : customRuleText(rule)}</p>
+   <small>${rule.name ? `${customRuleText(rule)} · ` : ''}Alert ${duration} · Now ${reading ? metricFormat(reading) : '—'}</small></div>
+  ${severityBadge(rule.severity)}
+  <button class="text-button" data-custom-remove="${esc(rule.id)}">Remove</button>
+ </div>`;
+}
+function customRulesPanel(rules) {
+ const devices = state.devices.filter(d => numericReadings(d).length);
+ const device = devices.find(d => String(d.device_id)===state.customDevice) || devices[0];
+ const readings = device ? numericReadings(device) : [];
+ const [metric, reading] = readings.find(([key]) => key===state.customMetric) || readings[0] || [];
+ const unit = reading?.unit || '';
+ const form = !device ? `<p class="collection-note">Custom rules need a device that has reported a numeric reading.</p>`
+  : rules.length >= 25 ? `<p class="collection-note">You have the maximum of 25 custom rules. Remove one to add another.</p>`
+  : `<form id="custom-rule" class="alert-form custom-rule-form" data-draft>
+   <div class="form-row"><label>Device<select name="device_id">${devices.map(d=>`<option value="${d.device_id}" ${d===device?'selected':''}>${esc(d.name)}</option>`).join('')}</select></label>
+    <label>Reading<select name="metric">${readings.map(([key, r])=>`<option value="${esc(key)}" ${key===metric?'selected':''}>${esc(r.label || key)} (now ${metricFormat(r)})</option>`).join('')}</select></label></div>
+   <div class="form-row custom-condition"><label>Alert when it is<select name="op"><option value="below">Below</option><option value="above">Above</option></select></label>
+    <label>Limit${unit?` (${esc(displayUnit(unit))})`:''}<input name="value" type="number" step="any" required placeholder="e.g. ${esc(fmt(toDisplay(reading?.value ?? 0, unit), 1))}"></label></div>
+   <div class="form-row custom-condition"><label>For at least (minutes)<input name="minutes" type="number" min="0" max="1440" step="1" value="5" required></label>
+    <label>Severity<select name="severity"><option value="info">Info</option><option value="warning" selected>Warning</option><option value="critical">Critical</option></select></label></div>
+   <label>Name (optional)<input name="name" maxlength="80" placeholder="e.g. Pipes could freeze"></label>
+   <p class="form-error" id="custom-rule-error" role="alert"></p>
+   <div class="form-actions"><button class="button primary" type="submit">${icon('plus')}Add rule</button></div>
+  </form>`;
+ return `<section class="panel alerts-panel"><div class="panel-heading"><div><h2>Custom rules <span class="count-badge">${rules.length}</span></h2><p>Alert on any numeric reading. The condition must last the set time to open an alert, and must stay clear as long to close it.</p></div></div>
+  <div class="alert-list">${rules.length ? rules.map(customRuleRow).join('') : '<div class="empty-state small"><p>No custom rules yet.</p></div>'}</div>
+  ${form}</section>`;
+}
+async function saveCustomRules(rules, message) {
+ const result = await api('/api/alerts/settings', {method:'POST', body:JSON.stringify({custom:rules})});
+ state.alerts = result.alerts; alertsSavedAt = Date.now();
+ toast(message);
+ render(); updateChrome();
+}
 function alertsPage() {
  const {open=[], recent=[], settings={}, webhook={}} = state.alerts || {};
  const alertError = state.collector.alert_error ? `<div class="notice warning">${icon('info')}Alert rules couldn’t run: ${esc(state.collector.alert_error)}</div>` : '';
@@ -665,6 +721,7 @@ function alertsPage() {
  <section class="panel alerts-panel"><div class="panel-heading"><div><h2>Open alerts <span class="count-badge">${open.length}</span></h2><p>An alert stays open until a fresh reading shows the problem has cleared.</p></div></div>
   <div class="alert-list">${open.length?open.map(a=>alertRow(a)).join(''):`<div class="empty-state small"><p>No open alerts.</p></div>`}</div></section>
  <div class="settings-layout alerts-layout">${alertRulesPanel(settings)}${webhookPanel(webhook)}</div>
+ ${customRulesPanel(settings.custom || [])}
  <section class="panel alerts-panel"><div class="panel-heading"><div><h2>Recently cleared</h2><p>Alerts that cleared in the last seven days.</p></div></div>
   <div class="alert-list">${recent.length?recent.map(a=>alertRow(a,true)).join(''):`<div class="empty-state small"><p>Nothing has cleared recently.</p></div>`}</div></section>`;
 }
@@ -690,7 +747,7 @@ document.addEventListener('submit', async e => {
    toast('Webhook saved. Send a test to check delivery.');
   }
   delete form.dataset.dirty;
-  state.alerts = result.alerts;
+  state.alerts = result.alerts; alertsSavedAt = Date.now();
   render(); updateChrome();
  } catch(err) { error.textContent = err.message; }
  finally { button.disabled = false; }
@@ -712,11 +769,52 @@ document.addEventListener('click', async e => {
   } else if(target.id==='webhook-remove') {
    if(!confirm('Remove the webhook? Alerts will still appear in the dashboard.')) return;
    const result = await api('/api/alerts/webhook', {method:'POST', body:JSON.stringify({url:null})});
-   state.alerts = result.alerts; render();
+   state.alerts = result.alerts; alertsSavedAt = Date.now(); render();
    toast('Webhook removed.');
   }
  } catch(err) { toast(err.message, true); await load(); }
  finally { if(target.isConnected) target.disabled = false; }
+});
+document.addEventListener('submit', async e => {
+ const form = e.target;
+ if(form.id!=='custom-rule') return;
+ e.preventDefault();
+ const button = $('button[type="submit"]', form), error = $('#custom-rule-error');
+ const device = state.devices.find(d => String(d.device_id)===form.elements.device_id.value);
+ const unit = device?.latest_metrics?.[form.elements.metric.value]?.unit || '';
+ const rule = {device_id:Number(form.elements.device_id.value), metric:form.elements.metric.value, op:form.elements.op.value,
+  value:fromDisplay(Number(form.elements.value.value), unit), minutes:Number(form.elements.minutes.value),
+  severity:form.elements.severity.value, name:form.elements.name.value};
+ button.disabled = true; error.textContent = '';
+ try {
+  delete form.dataset.dirty;
+  await saveCustomRules([...(state.alerts.settings.custom || []), rule], 'Custom rule added.');
+ } catch(err) { form.dataset.dirty = '1'; error.textContent = err.message; }
+ finally { if(button.isConnected) button.disabled = false; }
+});
+document.addEventListener('change', async e => {
+ const toggle = e.target.closest('[data-custom-toggle]');
+ if(toggle) {
+  const rules = (state.alerts.settings.custom || []).map(rule => rule.id===toggle.dataset.customToggle ? {...rule, enabled:toggle.checked} : rule);
+  try { await saveCustomRules(rules, toggle.checked ? 'Custom rule turned on.' : 'Custom rule turned off.'); }
+  catch(err) { toggle.checked = !toggle.checked; toast(err.message, true); }
+  return;
+ }
+ if(e.target.closest('#custom-rule') && ['device_id','metric'].includes(e.target.name)) {
+  // The reading list and the limit's unit depend on these choices.
+  if(e.target.name==='device_id') { state.customDevice = e.target.value; state.customMetric = undefined; }
+  else state.customMetric = e.target.value;
+  render();
+  const metricSelect = $('#custom-rule [name="metric"]');
+  if(metricSelect && !metricSelect.value) metricSelect.selectedIndex = 0;
+ }
+});
+document.addEventListener('click', async e => {
+ const remove = e.target.closest('[data-custom-remove]');
+ if(!remove) return;
+ remove.disabled = true;
+ try { await saveCustomRules((state.alerts.settings.custom || []).filter(rule => rule.id!==remove.dataset.customRemove), 'Custom rule removed.'); }
+ catch(err) { toast(err.message, true); remove.disabled = false; }
 });
 window.addEventListener('hashchange',route);
 window.matchMedia('(max-width: 530px)').addEventListener('change',()=>{if(state.page==='history')render();});

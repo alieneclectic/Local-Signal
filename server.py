@@ -428,6 +428,7 @@ class Store:
         # Last stored (value, time) per held reading, so repeats can be skipped. Anything older
         # than the heartbeat would be stored again anyway, so only recent rows need loading.
         self.last_stored = {}
+        self.alert_tracker = {}  # When each custom rule's reading entered its current state; see alerts.evaluate.
         warm = datetime.fromtimestamp(time.time() - SAMPLE_HEARTBEAT_SECONDS, timezone.utc).isoformat(timespec='seconds')
         for row in self.db.execute('''SELECT device_id,metric,value,MAX(at) AS at FROM samples
                                    WHERE at>=? AND device_id IS NOT NULL GROUP BY device_id,metric''', (warm,)):
@@ -535,7 +536,7 @@ class Store:
         with self.lock:
             current = self.setting('alerts')
             if data is not None:
-                current = alerts.validate_settings(data, current)
+                current = alerts.validate_settings(data, current, self.devices())
                 self.save_setting('alerts', current)
             return alerts.settings_from(current)
 
@@ -545,15 +546,16 @@ class Store:
         with self.lock, self.db:
             devices = self.devices()
             at = now()
-            evaluation = alerts.evaluate(devices, settings, datetime.fromisoformat(at), alerts.open_keys(self.db))
-            notes = alerts.sync(self.db, evaluation, devices, at)
+            evaluation = alerts.evaluate(devices, settings, datetime.fromisoformat(at), alerts.open_keys(self.db),
+                                         self.alert_tracker)
+            notes = alerts.sync(self.db, evaluation, devices, at, settings)
             for note in notes:
                 self.event(note['ip'], f'alert_{note["event"]}', note['text'])
         return [note for note in notes if note['event'] == 'opened' or settings['notify_resolved']]
 
     def alerts(self):
         with self.lock:
-            return alerts.list_alerts(self.db, self.devices(), datetime.now(timezone.utc))
+            return alerts.list_alerts(self.db, self.devices(), datetime.now(timezone.utc), self.alert_settings())
 
     def acknowledge_alert(self, alert_id):
         with self.lock, self.db:

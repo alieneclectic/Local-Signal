@@ -79,6 +79,8 @@ The **Alerts** page lists open alerts, the rules that raise them, and alerts tha
 
 Battery alerts clear five points above their threshold, so a reading that hovers at the limit doesn't send repeated notifications. Turning a rule off or unpinning a device closes its alerts without a notification.
 
+**Custom rules** watch any numeric reading a device has reported, such as "Garage temperature below 40 °F" or "Heater plug power above 1,500 W". Choose the device and reading, below or above, the limit, how many minutes the condition must last, a severity, and an optional name. You can add up to 25. The condition must last the set time before the alert opens, and the reading must stay back within the limit for the same time before it clears, so a brief spike or a reading that hovers at the limit doesn't send repeated notifications. Use 0 minutes to alert on the first reading. Temperature limits use your °C/°F display choice and are stored in °C. A rule judges only readings from the last 30 minutes, or the last 12 hours for devices marked as sleeping; older readings leave the alert as it is. After the collector restarts, a custom rule waits its full duration again before opening an alert.
+
 To get notifications on your phone or in home automation, open the dashboard on the collector computer and add a webhook under **Alerts → Notifications**:
 
 - **ntfy** sends the alert text with a title and priority to an [ntfy](https://ntfy.sh) topic URL, either a public server or one you host. Pick a topic name that's hard to guess.
