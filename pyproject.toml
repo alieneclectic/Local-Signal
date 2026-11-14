@@ -15,6 +15,7 @@ description = "Discover and monitor devices on your local network."
 sources = [
     "packaging/collector",
     "server.py",
+    "alerts.py",
     "coiot.py",
     "bacnet.py",
     "modbus.py",

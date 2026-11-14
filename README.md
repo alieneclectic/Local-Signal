@@ -7,6 +7,7 @@ Local Signal is a dashboard for discovering and monitoring devices on a local ne
 - **Build an inventory.** Scan the local subnet or add a device by its private IPv4 address. Use advertised names or add your own labels, rooms, and notes.
 - **Monitor devices.** See available power, energy, temperature, humidity, and media readings. Pin devices to the overview for quick access.
 - **Explore history.** Compare readings across devices and export collected samples as CSV. The collector records what it observes, so downtime and missed reports leave gaps.
+- **Get alerts.** Hear when a pinned device stops responding, a UPS goes on battery, or a printer or sensor runs low, in the dashboard or through an optional webhook.
 - **Check firmware.** See installed versions and update notices where supported. A newer published version and an update offered by the device are shown separately.
 
 ## Get started
@@ -63,6 +64,27 @@ These commercial readers need no extra Python dependencies. Manufacturer compati
 Settings shows the last collection duration. A warning appears when collection takes at least 30 seconds. CSV exports stream in batches. Charts fetch one selected metric, can be narrowed to a device, and share a 12,000-point budget across the view; full-resolution samples remain in CSV exports. See [capacity measurements and remaining limits](docs/capacity.md).
 
 Devices identified by a LiftMaster or myQ name show **Manual check** under **Devices → Firmware**. Expand the card for instructions on looking up the firmware version in the myQ app. If the device name or model includes **98022** or **98022MC**, the card shows the wall control instructions from the LiftMaster owner’s manual.
+
+## Alerts
+
+The **Alerts** page lists open alerts, the rules that raise them, and alerts that cleared in the last seven days. The collector checks the rules after each completed collection cycle. An alert opens once, stays open while a reading is missing or stale, and clears only when a fresh reading shows the problem is gone. Acknowledging an alert hides it from the overview banner; it stays listed until it clears.
+
+| Rule | Raises an alert when | Default |
+| --- | --- | --- |
+| Device stops responding | A device under **My devices** that isn't marked as sleeping has not responded for the set time. | 10 minutes |
+| UPS power | A NUT UPS reports that it is on battery or overloaded. | On |
+| UPS battery | A NUT UPS reports a low battery or a needed replacement, or its charge is at or below the threshold. | 50% |
+| Printer supplies | A supply reported over IPP is at or below the threshold. Each supply has its own alert. | 10% |
+| Sensor battery | A battery reading from the last two days is at or below the threshold. | 20% |
+
+Battery alerts clear five points above their threshold, so a reading that hovers at the limit doesn't send repeated notifications. Turning a rule off or unpinning a device closes its alerts without a notification.
+
+To get notifications on your phone or in home automation, open the dashboard on the collector computer and add a webhook under **Alerts → Notifications**:
+
+- **ntfy** sends the alert text with a title and priority to an [ntfy](https://ntfy.sh) topic URL, either a public server or one you host. Pick a topic name that's hard to guess.
+- **JSON** posts the event, rule, severity, text, device name and room. It suits Home Assistant webhook triggers and similar automations.
+
+Use **Send test** to check delivery. Plain `http://` is accepted only for private IPv4 addresses and localhost; use `https://` for anything else. Redirects and system proxies are not followed. Notifications contain device names, rooms and alert text, but never IP or MAC addresses. The URL is saved in a private file next to the database (`<database>.alert-webhook.json`) rather than in the database or its backups, and the dashboard shows only its host. Only the collector computer can change or test the webhook, even when the dashboard is shared with `--host 0.0.0.0`.
 
 ## Router monitoring
 

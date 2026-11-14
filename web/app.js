@@ -33,12 +33,13 @@ const paths = {
  pin:'<path d="m9 3 10 10-4 1-2 4-3-3-6 6m3-13 2-5m-2 5-3 2 9 8"/>',
  check:'<path d="m5 12 4 4L19 6"/>',
  moon:'<path d="M21 13A9 9 0 0 1 11 3a9 9 0 1 0 10 10Z"/>',
+ bell:'<path d="M6 9a6 6 0 1 1 12 0c0 6 3 8 3 8H3s3-2 3-8m4.5 12a1.8 1.8 0 0 0 3 0"/>',
  server:'<rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M12 6.5h5M12 17.5h5"/>'
 };
 const icon = (name, extra='') => `<svg class="icon ${extra}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.grid}</svg>`;
 function hydrateIcons(root=document) { $$('[data-icon]', root).forEach(el => { el.innerHTML = icon(el.dataset.icon); el.removeAttribute('data-icon'); }); }
 hydrateIcons();
-const state = {devices:[], firmware:[], firmware_events:[], collector:{network:{}}, events:[], samples:[], historyMetrics:[], historyDevice:'', page:'overview', filter:'all', query:'', range:24, metric:'latency_ms', connected:false, initial:true, unit:localStorage.getItem('hearth-unit') || 'F', chartDevices:new Set(), lastHistory:null, historyError:null};
+const state = {devices:[], firmware:[], firmware_events:[], alerts:{open:[], recent:[], settings:{}, webhook:{}}, collector:{network:{}}, events:[], samples:[], historyMetrics:[], historyDevice:'', page:'overview', filter:'all', query:'', range:24, metric:'latency_ms', connected:false, initial:true, unit:localStorage.getItem('hearth-unit') || 'F', chartDevices:new Set(), lastHistory:null, historyError:null};
 const colors = ['#2e6a51','#9eac58','#d09460','#7895b0','#9b86ae','#c17e85','#528f90','#b5a384']
  .map((color, i) => `var(--chart-series-${i+1}, ${color})`);
 let loading = false, toastTimer, detailDeviceId = null, historyController = null, historyRequest = 0;
@@ -107,6 +108,8 @@ async function load(force=false) {
   }
   const lastEventId=state.firmware_events[0]?.id ?? 0;
   const alerts=state.initial ? [] : (data.firmware_events||[]).filter(e=>e.id>lastEventId);
+  const knownAlerts=new Set(state.alerts.open.map(a=>a.id));
+  const newAlerts=state.initial ? [] : (data.alerts?.open||[]).filter(a=>!knownAlerts.has(a.id));
   Object.assign(state, data); state.connected=true; state.initial=false;
   if(state.page==='history' && (force || state.lastHistory?.poll!==state.collector.last_poll || state.lastHistory?.range!==state.range || state.lastHistory?.metric!==state.metric || state.lastHistory?.device!==state.historyDevice)) await loadHistory();
   updateChrome(); render();
@@ -114,7 +117,8 @@ async function load(force=false) {
    const sources=new Set(state.firmware.filter(d=>d.catalog_id&&!d.catalog_checked_at).map(d=>d.catalog_id));
    for(const source of sources) refreshFirmwareCatalog(source);
   }
-  if(alerts.length) toast(alerts.length===1?alerts[0].message:`${alerts.length} firmware updates reported. See Devices for details.`);
+  if(newAlerts.length) toast(newAlerts.length===1?`${newAlerts[0].device_name}: ${newAlerts[0].summary}`:`${newAlerts.length} new alerts. See Alerts for details.`, true);
+  else if(alerts.length) toast(alerts.length===1?alerts[0].message:`${alerts.length} firmware updates reported. See Devices for details.`);
  } catch(e) { state.connected=false; updateChrome(); if(state.initial) $('#main').innerHTML=`<div class="empty-state large">${icon('server')}<h1>The collector is taking a moment.</h1><p>Keep the Local Signal server running, then refresh the page.</p><button class="button primary" id="retry-load">Try again</button></div>`; else if(state.page==='devices'||state.page==='network') render(); }
  finally { loading=false; }
 }
@@ -147,6 +151,8 @@ function updateChrome() {
  $('#collector-status').innerHTML=`<i class="dot"></i>${state.connected?delayed?'Collection delayed':state.collector.health==='starting'?'Collector starting':'Collector online':'Collector disconnected'}`;
  $('#collector-status').classList.toggle('disconnected',!state.connected||delayed);
  $('#nav-count').textContent=state.devices.length || '0';
+ const pendingAlerts=unacknowledgedAlerts().length;
+ $('#nav-alerts').textContent=pendingAlerts;$('#nav-alerts').hidden=!pendingAlerts;
  $('#footer-status').textContent=state.connected?`Collected locally · Updated ${timeAgo(state.collector.last_poll)}`:'Collector disconnected · Reconnecting…';
  $('#refresh-button').classList.toggle('spinning',!!state.collector.polling);
 }
@@ -166,7 +172,7 @@ function overview() {
  const pinned=state.devices.filter(d=>d.pinned).sort((a,b)=>(b.status==='online')-(a.status==='online')||a.name.localeCompare(b.name));
  const live=state.connected?reporting().length:'—', online=state.connected?reachable().length:'—';
  const updates=state.connected?firmwareUpdateCount():'—';
- return `${heading('Overview', 'Discover and monitor devices on your network.')} ${connectionBanner()} ${scanBanner()}
+ return `${heading('Overview', 'Discover and monitor devices on your network.')} ${connectionBanner()} ${alertBanner()} ${scanBanner()}
  <section class="stats-grid" aria-label="Device summary">
  ${statCard('Devices in inventory',state.devices.length,`<a href="#devices" class="stat-link">View devices ${icon('arrow')}</a>`,'grid','highlight')}
  ${statCard('Devices reachable',online,`<a href="#network" class="stat-link">View network ${icon('arrow')}</a>`,'wifi')}
@@ -267,7 +273,7 @@ function activityPanel(full=false, firmwareOnly=false) {
  const title=firmwareOnly?'Firmware alerts':'Recent activity';
  const description=firmwareOnly?'Recent update notices from your devices.':'Recent changes across monitored devices.';
  const empty=firmwareOnly?'Firmware alerts will appear here when a device reports a new update.':'Device activity will appear here.';
- const icons={discovered:'plus',online:'activity',unreachable:'moon',firmware_update_available:'shield'};
+ const icons={discovered:'plus',online:'activity',unreachable:'moon',firmware_update_available:'shield',alert_opened:'bell',alert_resolved:'check'};
  return `<section class="panel activity-panel"><div class="panel-heading"><div><h2>${title}</h2><p>${description}</p></div><span class="activity-label">${icon('clock')} Live log</span></div><div class="activity-list">${events.length?events.map(e=>`<div class="activity-row"><span class="event-icon ${e.type==='online'?'positive':''}">${icon(icons[e.type]||'wifi')}</span><div><p>${esc(e.message)}</p><small>${esc(e.ip||'Local collector')}</small></div><time title="${esc(dateTime(e.at))}">${timeAgo(e.at)}</time></div>`).join(''):`<div class="empty-state small"><p>${empty}</p></div>`}</div></section>`;
 }
 function manualFirmwareGuide(device) {
@@ -462,7 +468,7 @@ function settingsPage() {
  </div>`;
  return `${heading('Settings', 'Manage display preferences and check the collector.',false,'WORKSPACE SETTINGS')}<div class="settings-layout"><section class="panel settings-panel"><div class="panel-heading"><div><h2>Your local collector</h2><p>Collection and storage on the collector computer.</p></div><span class="status-badge ${state.connected?'online':'offline'}"><i class="dot"></i>${state.connected?'Running':'Disconnected'}</span></div><dl class="settings-list"><div><dt>Collection interval</dt><dd>Every ${c.poll_seconds||30} seconds</dd></div><div><dt>History retention</dt><dd>${retention}</dd></div><div><dt>Data storage</dt><dd>Local SQLite database</dd></div>${codeSource?`<div><dt>Code source</dt><dd>${codeSource}</dd></div>`:''}<div><dt>Started</dt><dd>${dateTime(c.started_at)}</dd></div><div><dt>Last collection</dt><dd>${dateTime(c.last_poll)}</dd></div><div><dt>Last cycle duration</dt><dd>${Number.isFinite(c.last_poll_seconds)?`${fmt(c.last_poll_seconds)} seconds`:'Waiting for first cycle'}</dd></div><div><dt>Device access</dt><dd>Read-only telemetry</dd></div></dl><div class="notice">${icon('info')}${c.background?'Background collection starts at login and recovers after failures.':'Keep the server running to collect readings.'} The collector computer must be awake. Closing the browser doesn’t stop collection.</div></section><section class="panel settings-panel"><div class="panel-heading"><div><h2>Preferences</h2><p>Preferences for this browser.</p></div>${icon('settings')}</div>${themeChoice}<div class="setting-choice"><div><strong>Temperature unit</strong><p>Applies to charts and device readings.</p></div><div class="segmented">${['F','C'].map(u=>`<button class="${state.unit===u?'selected':''}" data-unit="${u}" aria-pressed="${state.unit===u}">°${u}</button>`).join('')}</div></div><div class="setting-choice export-setting"><div><strong>Export history</strong><p>Export all readings from the past ${dayLabel(days)}.</p></div><a href="/api/export.csv?hours=${days*24}" class="button secondary">${icon('download')}Export CSV</a></div><div class="supported-apis"><h3>Connected locally</h3><div><span class="api-logo">S</span><span><strong>Shelly Gen 1 & Gen 2+</strong><small>Power, sensors, relays, signal & uptime when exposed</small></span>${icon('check')}</div><p class="muted">Local readers also support Roku, Sonos, WiiM UPnP, and Google Cast receivers, including RIVA. Experimental readers cover configured BACnet/IP and Modbus TCP points, IPP network printers, and UPS readings through Network UPS Tools. Choose a protocol when adding or editing a device. Other paired or cloud-managed devices need their own integration. Authentication-protected APIs are flagged for setup.</p></div></section></div>${collectionStatusPanel()}${activityPanel(true)}`;
 }
-const views={overview,devices:devicesPage,history:historyPage,network:networkPage,settings:settingsPage};
+const views={overview,devices:devicesPage,alerts:alertsPage,history:historyPage,network:networkPage,settings:settingsPage};
 function render() {
  const main=$('#main'), focused=document.activeElement, focusID=focused?.id, selection=focused?.selectionStart;
  const cardSelector='details[data-inventory-id]';
@@ -473,7 +479,18 @@ function render() {
   if(card.open)openDeviceCards.add(deviceId);
   else openDeviceCards.delete(deviceId);
  }
+ // Polling re-renders the page; keep what someone is typing into a draft form.
+ const drafts=$$('form[data-dirty]',main).map(form=>[form.id,[...form.elements].filter(el=>el.name).map(el=>[el.name,el.type==='checkbox'?el.checked:el.value])]);
  main.innerHTML=views[state.page]();
+ for(const [id,values] of drafts) {
+  const form=document.getElementById(id);
+  if(!form) continue;
+  form.dataset.dirty='1';
+  for(const [name,value] of values) {
+   const el=form.elements[name];
+   if(el?.type==='checkbox') el.checked=value; else if(el) el.value=value;
+  }
+ }
  $$('[data-color]',main).forEach(el=>{el.style.backgroundColor=el.dataset.color;});
  const card=cardId && $$(cardSelector,main).find(el=>el.dataset.inventoryId===cardId);
  if(card) {
@@ -579,6 +596,128 @@ document.addEventListener('submit',async e=>{
  try{await api(`/api/devices/${detailDeviceId}`,{method:'PATCH',body:JSON.stringify({name:fields.get('name'),name_mode:fields.has('auto_name')?'auto':'manual',room:fields.get('room'),notes:fields.get('notes'),pinned:fields.has('pinned'),expected_sleep:fields.has('expected_sleep'),monitor_config:readMonitoring(form)})});$('#detail-dialog').close();toast('Device details saved.');await load();}catch(err){$('#edit-error').textContent=err.message;button.disabled=false;}
 });
 $$('dialog').forEach(dialog=>dialog.addEventListener('click',e=>{if(e.target===dialog){const r=dialog.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)dialog.close();}}));
+// Alerts --------------------------------------------------------------------------------
+const alertRuleFields = [
+ // [settings key, label, help, threshold field, threshold prefix, threshold unit]
+ ['device_offline', 'A pinned device stops responding', 'Devices in My devices that aren’t marked as sleeping.', 'minutes', 'After', 'min'],
+ ['ups_power', 'A UPS switches to battery or is overloaded', 'Uses the status flags reported through NUT.'],
+ ['ups_battery', 'A UPS battery is low or needs replacement', 'Also uses the UPS’s own low-battery flag.', 'pct', 'At or below', '%'],
+ ['printer_supply', 'A printer supply is low', 'Toner, ink and other supplies the printer reports over IPP.', 'pct', 'At or below', '%'],
+ ['sensor_battery', 'A sensor battery is low', 'Uses battery readings reported in the last two days.', 'pct', 'At or below', '%'],
+];
+const thresholdLimits = {minutes:[2,1440], pct:[1,99]};
+const unacknowledgedAlerts = () => (state.alerts.open||[]).filter(a=>!a.acknowledged_at);
+function severityBadge(severity) {
+ const [label, cls] = {critical:['Critical','offline'], warning:['Warning','attention'], info:['Info','reachable']}[severity] || ['Alert','attention'];
+ return `<span class="status-badge ${cls}"><i class="dot"></i>${label}</span>`;
+}
+function alertBanner() {
+ const pending = unacknowledgedAlerts();
+ if(!state.connected || !pending.length) return '';
+ const first = pending[0];
+ const text = pending.length===1 ? `<strong>${esc(first.device_name)}</strong>: ${esc(first.summary)}` : `${pending.length} alerts need attention.`;
+ return `<div class="notice warning alert-notice">${icon('bell')}<span>${text}</span><a class="notice-right text-button" href="#alerts">View alerts ${icon('arrow')}</a></div>`;
+}
+function alertRow(alert, resolved=false) {
+ const when = resolved
+  ? `<time title="${esc(dateTime(alert.resolved_at))}">Cleared ${timeAgo(alert.resolved_at)}</time>`
+  : `<time title="${esc(dateTime(alert.opened_at))}">Opened ${timeAgo(alert.opened_at)}</time>`;
+ const action = resolved ? '' : alert.acknowledged_at ? '<span>Acknowledged</span>'
+  : `<button class="text-button" data-ack="${alert.id}">Acknowledge</button>`;
+ return `<div class="alert-row ${resolved?'resolved':''}">
+  ${severityBadge(alert.severity)}
+  <div class="alert-text"><p><strong>${esc(alert.device_name)}</strong> · ${esc(alert.title)}</p><small>${esc(alert.summary)}${alert.room?` · ${esc(alert.room)}`:''}</small></div>
+  <div class="alert-meta">${when}${action}</div>
+ </div>`;
+}
+function alertRulesPanel(settings) {
+ const rules = alertRuleFields.map(([key, label, help, field, prefix, unit]) => {
+  const rule = settings[key] || {};
+  const threshold = field ? `<label class="alert-threshold">${prefix}<input type="number" name="${key}.${field}" value="${esc(rule[field] ?? '')}" min="${thresholdLimits[field][0]}" max="${thresholdLimits[field][1]}" step="1" required aria-label="${esc(label)}: ${prefix.toLowerCase()} (${unit})">${unit}</label>` : '';
+  return `<div class="alert-rule"><label class="check-label"><input type="checkbox" name="${key}.enabled" ${rule.enabled?'checked':''}><span><strong>${label}</strong><small>${help}</small></span></label>${threshold}</div>`;
+ }).join('');
+ return `<section class="panel settings-panel"><div class="panel-heading"><div><h2>Alert rules</h2><p>Checked after each collection cycle. Missing readings never clear an alert.</p></div>${icon('bell')}</div>
+ <form id="alert-rules" class="alert-form" data-draft>${rules}
+  <label class="check-label"><input type="checkbox" name="notify_resolved" ${settings.notify_resolved?'checked':''}>Also notify when an alert clears</label>
+  <p class="form-error" id="alert-rules-error" role="alert"></p>
+  <div class="form-actions"><button class="button primary" type="submit">Save rules</button></div>
+ </form></section>`;
+}
+function webhookPanel(hook) {
+ const status = hook.configured
+  ? `<dl class="settings-list"><div><dt>Destination</dt><dd class="mono">${esc(hook.destination)}</dd></div><div><dt>Format</dt><dd>${hook.format==='json'?'JSON':'ntfy'}</dd></div><div><dt>Last delivered</dt><dd>${dateTime(hook.last_sent_at)}</dd></div></dl>`
+  : `<p class="collection-note">No webhook is set up. Alerts appear on this page, in the overview, and in the activity log.</p>`;
+ const problem = hook.error || hook.last_error;
+ const form = hook.editable ? `<form id="alert-webhook" class="alert-form" data-draft>
+  <label>${hook.configured?'Replace webhook URL':'Webhook URL'}<input name="url" type="url" maxlength="2048" required autocomplete="off" spellcheck="false" placeholder="https://ntfy.sh/your-private-topic"></label>
+  <label>Format<select name="format"><option value="ntfy" ${hook.format!=='json'?'selected':''}>ntfy — plain text with a title and priority</option><option value="json" ${hook.format==='json'?'selected':''}>JSON — for Home Assistant and other automations</option></select></label>
+  <p class="form-error" id="webhook-error" role="alert"></p>
+  <div class="form-actions"><button class="button primary" type="submit">Save webhook</button>${hook.configured?`<button type="button" class="button secondary" id="webhook-test">Send test</button><button type="button" class="text-button" id="webhook-remove">Remove webhook</button>`:''}</div>
+ </form>` : `<p class="collection-note">To change notification delivery, open the dashboard on the collector computer at localhost.</p>`;
+ return `<section class="panel settings-panel"><div class="panel-heading"><div><h2>Notifications</h2><p>Send alerts to your phone or home automation.</p></div>${icon('wifi')}</div>
+ ${status}${problem?`<div class="notice warning">${icon('info')}${esc(problem)}</div>`:''}${form}
+ <p class="collection-note">Notifications contain device names, rooms and alert text, never IP or MAC addresses. The URL is saved in a private file next to the database and isn’t shown again. Plain http:// is allowed only for private addresses.</p></section>`;
+}
+function alertsPage() {
+ const {open=[], recent=[], settings={}, webhook={}} = state.alerts || {};
+ const alertError = state.collector.alert_error ? `<div class="notice warning">${icon('info')}Alert rules couldn’t run: ${esc(state.collector.alert_error)}</div>` : '';
+ return `${heading('Alerts', 'Get notified when monitored devices need attention.', false, 'MONITORING')}${connectionBanner()}${alertError}
+ <section class="panel alerts-panel"><div class="panel-heading"><div><h2>Open alerts <span class="count-badge">${open.length}</span></h2><p>An alert stays open until a fresh reading shows the problem has cleared.</p></div></div>
+  <div class="alert-list">${open.length?open.map(a=>alertRow(a)).join(''):`<div class="empty-state small"><p>No open alerts.</p></div>`}</div></section>
+ <div class="settings-layout alerts-layout">${alertRulesPanel(settings)}${webhookPanel(webhook)}</div>
+ <section class="panel alerts-panel"><div class="panel-heading"><div><h2>Recently cleared</h2><p>Alerts that cleared in the last seven days.</p></div></div>
+  <div class="alert-list">${recent.length?recent.map(a=>alertRow(a,true)).join(''):`<div class="empty-state small"><p>Nothing has cleared recently.</p></div>`}</div></section>`;
+}
+document.addEventListener('input', e => { const form=e.target.closest('form[data-draft]'); if(form) form.dataset.dirty='1'; });
+document.addEventListener('submit', async e => {
+ const form = e.target;
+ if(form.id!=='alert-rules' && form.id!=='alert-webhook') return;
+ e.preventDefault();
+ const button = $('button[type="submit"]', form), error = $('.form-error', form);
+ button.disabled = true; error.textContent = '';
+ try {
+  let result;
+  if(form.id==='alert-rules') {
+   const payload = {notify_resolved: form.elements.notify_resolved.checked};
+   for(const [key, , , field] of alertRuleFields) {
+    payload[key] = {enabled: form.elements[`${key}.enabled`].checked};
+    if(field) payload[key][field] = Number(form.elements[`${key}.${field}`].value);
+   }
+   result = await api('/api/alerts/settings', {method:'POST', body:JSON.stringify(payload)});
+   toast('Alert rules saved.');
+  } else {
+   result = await api('/api/alerts/webhook', {method:'POST', body:JSON.stringify({url:form.elements.url.value, format:form.elements.format.value})});
+   toast('Webhook saved. Send a test to check delivery.');
+  }
+  delete form.dataset.dirty;
+  state.alerts = result.alerts;
+  render(); updateChrome();
+ } catch(err) { error.textContent = err.message; }
+ finally { button.disabled = false; }
+});
+document.addEventListener('click', async e => {
+ const target = e.target.closest('button');
+ if(!target) return;
+ try {
+  if(target.dataset.ack) {
+   target.disabled = true;
+   await api(`/api/alerts/${target.dataset.ack}/acknowledge`, {method:'POST', body:'{}'});
+   toast('Alert acknowledged. It stays listed until it clears.');
+   await load();
+  } else if(target.id==='webhook-test') {
+   target.disabled = true;
+   await api('/api/alerts/webhook/test', {method:'POST', body:'{}'});
+   toast('Test notification delivered.');
+   await load();
+  } else if(target.id==='webhook-remove') {
+   if(!confirm('Remove the webhook? Alerts will still appear in the dashboard.')) return;
+   const result = await api('/api/alerts/webhook', {method:'POST', body:JSON.stringify({url:null})});
+   state.alerts = result.alerts; render();
+   toast('Webhook removed.');
+  }
+ } catch(err) { toast(err.message, true); await load(); }
+ finally { if(target.isConnected) target.disabled = false; }
+});
 window.addEventListener('hashchange',route);
 window.matchMedia('(max-width: 530px)').addEventListener('change',()=>{if(state.page==='history')render();});
 route();load(true);setInterval(load,5000);setInterval(updateChrome,15000);

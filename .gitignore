@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 .data/
 *.google-wifi.json
+*.alert-webhook.json
 .DS_Store
 .pytest_cache/
 

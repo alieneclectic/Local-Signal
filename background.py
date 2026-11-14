@@ -22,7 +22,7 @@ PLIST = Path.home() / 'Library' / 'LaunchAgents' / f'{LABEL}.plist'
 DOMAIN = f'gui/{os.getuid()}' if sys.platform == 'darwin' else None
 FILES = ['server.py', 'coiot.py', 'network_names.py', 'media_readers.py', 'energy.py', 'reliability.py', 'background.py', 'requirements.txt', 'macos/Collector.swift']
 FILES += ['dev.py']
-FILES += ['bacnet.py', 'modbus.py', 'device_io.py', 'ipp.py', 'nut.py']
+FILES += ['bacnet.py', 'modbus.py', 'device_io.py', 'ipp.py', 'nut.py', 'alerts.py']
 FILES += ['routers/__init__.py', 'routers/monitor.py', 'routers/adapters/__init__.py', 'routers/adapters/google_wifi.py']
 FILES += ['firmware/__init__.py', 'firmware/checks.py', 'firmware/adapters/__init__.py',
           'firmware/adapters/shelly.py', 'firmware/adapters/wiim.py', 'firmware/adapters/sonos.py',
