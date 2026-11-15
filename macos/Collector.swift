@@ -5,6 +5,11 @@ import Dispatch
 import Darwin
 
 let support = Bundle.main.bundleURL.deletingLastPathComponent()
+let listenHost = ProcessInfo.processInfo.environment["LOCAL_SIGNAL_HOST"] ?? "127.0.0.1"
+guard ["127.0.0.1", "0.0.0.0"].contains(listenHost) else {
+    fputs("Local Signal has an invalid dashboard listen address.\n", stderr)
+    exit(2)
+}
 let application = NSApplication.shared
 application.setActivationPolicy(.accessory)
 application.finishLaunching()
@@ -26,7 +31,7 @@ if permissionSocket >= 0 {
 let child = Process()
 child.executableURL = support.appendingPathComponent(".venv/bin/python")
 let runtime = support.appendingPathComponent("runtime")
-let collectorArgs = ["--host", "0.0.0.0", "--port", "8799", "--data",
+let collectorArgs = ["--host", listenHost, "--port", "8799", "--data",
                      support.appendingPathComponent("data/hearth.sqlite3").path, "--background"]
 if let checkout = ProcessInfo.processInfo.environment["LOCAL_SIGNAL_CHECKOUT"] {
     child.arguments = ["-u", runtime.appendingPathComponent("dev.py").path, "--checkout", checkout] + collectorArgs

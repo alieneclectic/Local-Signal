@@ -268,10 +268,13 @@ def normalize(info, status):
         powers = [m.get('power') for m in valid_meters if number(m.get('power'))]
         if powers:
             add('power_w', sum(powers), 'W', 'Power')
-        totals = [m['total'] for m in valid_meters if number(m.get('total'))]
-        if totals:
+        meters = status.get('meters', [])
+        totals = [m['total'] for m in valid_meters if number(m.get('total')) and m['total'] >= 0]
+        if totals and len(totals) == len(meters):
             # Gen1 meters.total is watt-minutes, not Wh. Convert to kWh.
             add('energy_kwh', sum(totals) / 60_000, 'kWh', 'Device energy counter')
+            if 'energy_kwh' in metrics:
+                metrics['energy_kwh']['source_channels'] = [f'meter:{i}' for i in range(len(meters))]
         for i, meter in enumerate(status.get('meters', [])):
             if meter.get('is_valid', True):
                 add(f'power_{i}_w', meter.get('power'), 'W', f'Channel {i + 1} power', i)
@@ -288,18 +291,19 @@ def normalize(info, status):
     else:
         add('rssi_dbm', (status.get('wifi') or {}).get('rssi'), 'dBm', 'Wi-Fi signal')
         add('uptime_s', (status.get('sys') or {}).get('uptime'), 's', 'Uptime')
-        powers, energies = [], []
+        powers, energies, energy_channels = [], [], []
         for key, component in status.items():
             if not isinstance(component, dict):
                 continue
             if key.startswith(('switch:', 'pm1:', 'em1:', 'em:')):
+                energy_channels.append(key)
                 idx = key.split(':')[1]
                 power = component.get('apower', component.get('total_act_power'))
                 if number(power):
                     powers.append(power)
                     add(f'{key}_power_w', power, 'W', f'{key} power')
                 energy = (component.get('aenergy') or {}).get('total')
-                if number(energy):
+                if number(energy) and energy >= 0:
                     energies.append(energy)
                 if isinstance(component.get('output'), bool):
                     add(f'relay_{idx}', int(component['output']), '', f'Channel {int(idx) + 1} relay')
@@ -314,8 +318,10 @@ def normalize(info, status):
                 add('battery_pct', (component.get('battery') or {}).get('percent'), '%', 'Battery')
         if powers:
             add('power_w', sum(powers), 'W', 'Power')
-        if energies:
+        if energies and len(energies) == len(energy_channels):
             add('energy_kwh', sum(energies) / 1000, 'kWh', 'Device energy counter')
+            if 'energy_kwh' in metrics:
+                metrics['energy_kwh']['source_channels'] = sorted(energy_channels)
     return metrics
 
 
@@ -407,6 +413,8 @@ class Store:
           CREATE INDEX IF NOT EXISTS text_samples_lookup ON text_samples(at,ip,metric);
           CREATE TABLE IF NOT EXISTS energy_readings (source_id TEXT NOT NULL, at TEXT NOT NULL,
             counter_kwh REAL NOT NULL, uptime_s REAL, PRIMARY KEY(source_id,at));
+          CREATE TABLE IF NOT EXISTS energy_reading_channels (source_id TEXT NOT NULL, at TEXT NOT NULL,
+            channels TEXT NOT NULL, PRIMARY KEY(source_id,at));
         ''')
         self.db.executescript(alerts.SCHEMA)
         self.migrate_device_identity()
@@ -524,7 +532,9 @@ class Store:
         at, dates, edges = energy.window(days, settings['timezone'])
         cutoff = datetime.fromtimestamp(edges[0].timestamp() - energy.MAX_INTERVAL_SECONDS, timezone.utc).isoformat()
         with self.lock:
-            rows = [dict(r) for r in self.db.execute('SELECT * FROM energy_readings WHERE at>=? ORDER BY source_id,at', (cutoff,))]
+            rows = [dict(r) for r in self.db.execute('''SELECT r.*,c.channels FROM energy_readings r
+                LEFT JOIN energy_reading_channels c ON c.source_id=r.source_id AND c.at=r.at
+                WHERE r.at>=? ORDER BY r.source_id,r.at''', (cutoff,))]
         devices = self.devices()
         result = energy.summarize(rows, devices, settings, days, at)
         result['rate_note'] = self.setting('heating_rate_note')
@@ -551,6 +561,8 @@ class Store:
             notes = alerts.sync(self.db, evaluation, devices, at, settings)
             for note in notes:
                 self.event(note['ip'], f'alert_{note["event"]}', note['text'])
+            alerts.queue_notifications(self.db, [note for note in notes if note['event'] == 'opened' or settings['notify_resolved']],
+                                       self.path, at)
         return [note for note in notes if note['event'] == 'opened' or settings['notify_resolved']]
 
     def alerts(self):
@@ -691,6 +703,14 @@ class Store:
             old = json.loads(row['payload'])
             if row['ip'] == ip and checked_at < old.get('checked_at', ''):
                 return False
+            current_energy = result.get('metrics', {}).get('energy_kwh', {})
+            previous_energy = old.get('latest_metrics', {}).get('energy_kwh', {})
+            channels = current_energy.get('source_channels')
+            known_channels = previous_energy.get('source_channels')
+            if channels and known_channels and not set(known_channels).issubset(channels):
+                # A missing component is unknown, not a smaller cumulative total. Preserve the
+                # known membership across partial responses and process restarts.
+                result = {**result, 'metrics': {key: value for key, value in result['metrics'].items() if key != 'energy_kwh'}}
             # Keep identity and the last successful API payload when a device sleeps.
             payload = {**old, **result}
             latest = dict(old.get('latest_metrics', {}))
@@ -740,8 +760,13 @@ class Store:
             mac = energy.identity(payload.get('mac'))
             if mac and number(counter) and counter >= 0:
                 uptime = result.get('metrics', {}).get('uptime_s', {}).get('value')
-                self.db.execute('INSERT OR IGNORE INTO energy_readings VALUES(?,?,?,?)',
-                                (mac, result['checked_at'], counter, uptime if number(uptime) else None))
+                inserted = self.db.execute('INSERT OR IGNORE INTO energy_readings VALUES(?,?,?,?)',
+                                           (mac, result['checked_at'], counter, uptime if number(uptime) else None))
+                channels = result['metrics']['energy_kwh'].get('source_channels')
+                if inserted.rowcount and channels:
+                    # Keep a companion table so older collectors' four-column inserts remain valid.
+                    self.db.execute('INSERT INTO energy_reading_channels VALUES(?,?,?)',
+                                    (mac, result['checked_at'], json.dumps(sorted(channels))))
             check = result.get('firmware_check')
             if check and check['status'] == 'available':
                 version = check['available_version']
@@ -1064,6 +1089,7 @@ class Store:
             self.db.execute('DELETE FROM samples WHERE at<?', (cutoff,))
             self.db.execute('DELETE FROM text_samples WHERE at<?', (cutoff,))
             self.db.execute('DELETE FROM energy_readings WHERE at<?', (cutoff,))
+            self.db.execute('DELETE FROM energy_reading_channels WHERE at<?', (cutoff,))
             alerts.cleanup(self.db, cutoff)
             self.db.execute('DELETE FROM events WHERE id NOT IN (SELECT id FROM events ORDER BY id DESC LIMIT 1000)')
             self.db.commit()
@@ -1129,7 +1155,16 @@ class Collector:
                 for future in concurrent.futures.as_completed(futures):
                     device = futures[future]
                     try:
-                        self.store.record(device['ip'], future.result(), expected_device_id=device['device_id'],
+                        result = future.result()
+                    except Exception as exc:
+                        # One malformed response must not prevent other devices' alerts or
+                        # make the managed collector restart indefinitely. This is unknown
+                        # device state, not evidence that it is reachable or unreachable.
+                        print(f'Collector: {device["ip"]}: device read failed: {exc}', flush=True)
+                        result = {'status': 'error', 'reachable': None, 'metrics': {}, 'checked_at': now(),
+                                  'error': f'Device telemetry could not be read: {str(exc)[:160]}'}
+                    try:
+                        self.store.record(device['ip'], result, expected_device_id=device['device_id'],
                                           expected_monitor_config=device['monitor_config'])
                     except Exception as exc:
                         failures += 1
@@ -1165,7 +1200,7 @@ class Collector:
         if not self.has_completed_cycle:
             return
         try:
-            self.notifier.enqueue(self.store.update_alerts())
+            self.store.update_alerts()
             self.state['alert_error'] = None
         except (sqlite3.Error, ValueError, TypeError, KeyError) as exc:
             # An alert problem is reported separately and never fails device collection.

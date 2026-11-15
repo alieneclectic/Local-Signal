@@ -31,10 +31,19 @@ FILES += ['firmware/__init__.py', 'firmware/checks.py', 'firmware/adapters/__ini
 SYSTEM_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
 
 
-def agent_config(python, runtime, data, launcher=None, *, label=LABEL, launcher_args=(), checkout=None):
+def collector_host(requested=None, previous=None):
+    """Retain an explicit sharing choice; legacy agents had no opt-in setting."""
+    host = requested if requested is not None else (previous or {}).get('EnvironmentVariables', {}).get('LOCAL_SIGNAL_HOST', '127.0.0.1')
+    if host not in ('127.0.0.1', '0.0.0.0'):
+        raise ValueError('Choose 127.0.0.1 for this computer or 0.0.0.0 to share on the local network.')
+    return host
+
+
+def agent_config(python, runtime, data, launcher=None, *, label=LABEL, launcher_args=(), checkout=None, host='127.0.0.1'):
+    host = collector_host(host)
     arguments = [str(launcher), *launcher_args] if launcher else [str(python), '-u', str(runtime / 'server.py'),
-                                                 '--host', '0.0.0.0', '--data', str(data), '--background']
-    env = {'PATH': SYSTEM_PATH, 'PYTHONUNBUFFERED': '1'}
+                                                 '--host', host, '--data', str(data), '--background']
+    env = {'PATH': SYSTEM_PATH, 'PYTHONUNBUFFERED': '1', 'LOCAL_SIGNAL_HOST': host}
     if checkout is not None:
         env['LOCAL_SIGNAL_CHECKOUT'] = str(checkout)
     return {'Label': label, 'ProgramArguments': arguments, 'AssociatedBundleIdentifiers': [label],
@@ -133,16 +142,18 @@ def copy_database(source, target):
         temporary.unlink(missing_ok=True)
 
 
-def install(follow_checkout=None):
+def install(follow_checkout=None, host=None):
     if sys.platform != 'darwin':
         raise RuntimeError('The background installer requires macOS.')
     os.umask(0o077)
     old_plist = PLIST.read_bytes() if PLIST.exists() else None
+    previous_config = plistlib.loads(old_plist) if old_plist else {}
+    host = collector_host(host, previous_config)
     checkout = None
     if follow_checkout is True:
         checkout = ROOT
     elif follow_checkout is None and old_plist:
-        checkout = plistlib.loads(old_plist).get('EnvironmentVariables', {}).get('LOCAL_SIGNAL_CHECKOUT')
+        checkout = previous_config.get('EnvironmentVariables', {}).get('LOCAL_SIGNAL_CHECKOUT')
     SUPPORT.mkdir(parents=True, exist_ok=True)
     data_dir = SUPPORT / 'data'
     (data_dir / 'logs').mkdir(parents=True, exist_ok=True)
@@ -198,7 +209,7 @@ def install(follow_checkout=None):
         PLIST.parent.mkdir(parents=True, exist_ok=True)
         temporary_plist = PLIST.with_suffix('.tmp')
         temporary_plist.write_bytes(plistlib.dumps(
-            agent_config(python, runtime, data, app / 'Contents/MacOS/Hearth', checkout=checkout)))
+            agent_config(python, runtime, data, app / 'Contents/MacOS/Hearth', checkout=checkout, host=host)))
         temporary_plist.replace(PLIST)
         launchctl('enable', f'{DOMAIN}/{LABEL}')
         bootstrap(PLIST)
@@ -206,6 +217,7 @@ def install(follow_checkout=None):
             state = live_state()
             if state and state['collector'].get('background') and state['collector'].get('database_path') == str(data):
                 print('Background collection is running at http://localhost:8799')
+                print('Dashboard access: ' + ('trusted local network (no login)' if host == '0.0.0.0' else 'this computer only'))
                 print(f'History and backups: {data_dir}')
                 return
             time.sleep(.25)
@@ -235,7 +247,7 @@ def install(follow_checkout=None):
             PLIST.unlink(missing_ok=True)
         if old_pid:
             with (ROOT / '.data' / 'server.log').open('ab') as log:
-                process = subprocess.Popen([sys.executable, '-u', str(ROOT / 'server.py'), '--host', '0.0.0.0'],
+                process = subprocess.Popen([sys.executable, '-u', str(ROOT / 'server.py'), '--host', host],
                                            cwd=ROOT, stdout=log, stderr=log, start_new_session=True)
             (ROOT / '.data' / 'server.pid').write_text(str(process.pid))
         raise
@@ -244,6 +256,8 @@ def install(follow_checkout=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['install', 'status', 'uninstall'])
+    parser.add_argument('--host', choices=['127.0.0.1', '0.0.0.0'],
+                        help='Dashboard access when installing: this computer (default), or explicitly share on the trusted local network. Retains a previously explicit choice.')
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument('--follow-checkout', action='store_true', help='Reload code from this checkout as it changes.')
     mode.add_argument('--installed-snapshot', dest='follow_checkout', action='store_false',
@@ -252,8 +266,10 @@ def main():
     args = parser.parse_args()
     if sys.platform != 'darwin':
         parser.error('The background installer requires macOS.')
+    if args.host is not None and args.action != 'install':
+        parser.error('--host applies only to install.')
     if args.action == 'install':
-        install(args.follow_checkout)
+        install(args.follow_checkout, host=args.host)
     elif args.action == 'status':
         result = launchctl('print', f'{DOMAIN}/{LABEL}', check=False)
         print(result.stdout if result.returncode == 0 else 'Background collector is not loaded.')
@@ -269,6 +285,6 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
+    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f'Background setup failed: {exc}', file=sys.stderr)
         sys.exit(1)

@@ -34,6 +34,7 @@ def manage_login(action, argv, data):
     config = plistlib.dumps(background.agent_config(
         None, data.parent, data, launcher=launcher, label=label,
         launcher_args=['--background', '--host', args.host, '--port', str(args.port)],
+        host=args.host,
     ))
     if plist.exists() and plist.read_bytes() != config:
         parser.error('Run --disable-background before changing the login configuration.')

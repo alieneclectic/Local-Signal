@@ -30,6 +30,8 @@ python3 -m venv .venv
 
 On macOS, [install-background.command](install-background.command) can set up collection at login. It requires Xcode's Swift compiler and an Apple code signing identity. The running collector keeps up to seven daily database snapshots locally. Check **Settings** for the code source and collection and backup status.
 
+The background dashboard defaults to this computer only. To share it on a trusted local network, install with `./install-background.command --host 0.0.0.0`; use `--host 127.0.0.1` to switch back. Later reinstalls retain this explicit choice. Updating an older installation that had no sharing setting defaults to this computer unless you opt in. Existing installed collectors keep their current setting until reinstalled. Network access does not require a login: anyone who can reach the shared dashboard can view readings and edit its local data.
+
 Run `./install-background.command --follow-checkout` if you want the background collector at port 8799 to follow edits in this checkout. It reloads the page after frontend edits and restarts collection after backend edits. The collector uses the installed snapshot when the checkout is unavailable or fails to load. Both sources use the same installed history. Rerun the installer when dependencies or the launcher change. Use `--installed-snapshot` to switch back to manual updates.
 
 Volume, mute, relay, Wi-Fi signal, and battery readings are stored when they change, and at least every 10 minutes while they stay the same. Other readings are stored on every collection. To remove repeated readings that an earlier version stored, run `server.py --compact-history --data PATH` with the database path. The command backs up the database first, keeps every change, and then reclaims the freed space.
@@ -88,6 +90,10 @@ To get notifications on your phone or in home automation, open the dashboard on 
 
 Use **Send test** to check delivery. Plain `http://` is accepted only for private IPv4 addresses and localhost; use `https://` for anything else. Redirects and system proxies are not followed. Notifications contain device names, rooms and alert text, but never IP or MAC addresses. The URL is saved in a private file next to the database (`<database>.alert-webhook.json`) rather than in the database or its backups, and the dashboard shows only its host. Only the collector computer can change or test the webhook, even when the dashboard is shared with `--host 0.0.0.0`.
 
+Notifications are saved locally and resume after a collector restart. Delivery gets up to eight attempts: the first is immediate, with retries after 30 seconds, 2 minutes, 10 minutes, 30 minutes, 2 hours, 6 hours, and 12 hours. **Alerts → Notifications** shows pending deliveries, retries, and failures. Up to 200 notifications can wait for delivery; additional events remain visible as delivery failures. Only events raised while a valid webhook is configured are queued.
+
+Removing or replacing a webhook cancels its waiting notifications. A request already in progress may finish at the old destination; its backlog is never sent to the replacement. A restart after a receiver accepts a request can cause a duplicate, so retries carry the same `X-Local-Signal-Event` header and JSON `event_id` for receivers that support deduplication.
+
 ## Router monitoring
 
 The **Network** page can show per-device upload and download rates and internet pause status through optional read-only router adapters. The page lists the adapters available in your build. An adapter reports **Unsupported** for measurements it cannot provide and **Unknown** when an individual reading is missing. Local network discovery is available independently.
@@ -112,6 +118,8 @@ Setup stores a reusable Google credential in a private companion file next to th
 Device access is read-only. Local Signal can report relay, playback, and firmware status; labels and settings are saved in its own database. Firmware checks may fetch public vendor release information without sending device data.
 
 The dashboard listens on the computer running it by default. To make it available on a trusted local network, start it with `--host 0.0.0.0` and use the local network URL printed at startup. The dashboard has no login, so anyone who can reach it can view readings and edit dashboard data. Keep it off the public internet. Use `--port` to choose a different port or `--data` to choose a database file.
+
+On macOS, opening `start.command` reuses an existing collector, or starts a source collector on this computer only. Running it with server options, such as `./start.command --host 0.0.0.0 --port 8800`, starts a source collector with those options; it does not change an installed background collector. Choose an available port if another collector is running. See the background installer options above to change login startup, or the [packaging guide](packaging/README.md#macos) for the PKG app.
 
 ## Contributing
 

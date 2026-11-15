@@ -70,12 +70,75 @@ class MetricsTests(unittest.TestCase):
         metrics=server.normalize({'type':'SHHT-1'}, {'tmp':{'value':float('nan')},'hum':{'value':True},'bat':{'value':float('inf')}})
         self.assertFalse(metrics)
 
+    def test_energy_aggregate_requires_every_reported_channel_counter(self):
+        for missing in ({'is_valid': False, 'total': 60000}, {}, {'total': None}, {'total': -1}, {'total': True}):
+            with self.subTest(gen=1, missing=missing):
+                metrics = server.normalize({'type': 'SHSW-25'}, {'meters': [{'power': 10, 'total': 60000}, missing]})
+                self.assertNotIn('energy_kwh', metrics)
+                self.assertEqual(metrics['power_0_w']['value'], 10)
+        for missing in ({}, {'total': None}, {'total': -1}, {'total': True}):
+            with self.subTest(gen=2, missing=missing):
+                metrics = server.normalize({'gen': 2}, {'switch:0': {'apower': 10, 'aenergy': {'total': 1000}},
+                                                       'switch:1': {'aenergy': missing}})
+                self.assertNotIn('energy_kwh', metrics)
+                self.assertEqual(metrics['switch:0_power_w']['value'], 10)
+
     def test_probe_uses_only_read_only_endpoints(self):
         device={'ip':'10.23.0.10'}
         with patch.object(server,'ping',return_value=(True,12)), patch.object(server,'port_open',return_value=True), patch.object(server,'read_json',side_effect=[{'type':'SHSW-PM'},{'relays':[{'ison':True}],'meters':[{'power':400}]}]) as read:
             result=server.probe_device(device)
         self.assertEqual(result['status'],'online')
         self.assertEqual([c.args[1] for c in read.call_args_list],['/shelly','/status'])
+
+
+class CollectorIsolationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = server.Store(Path(self.tmp.name) / 'test.sqlite3')
+        self.bad_ip, self.offline_ip = '10.23.0.40', '10.23.0.41'
+        before = (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat(timespec='seconds')
+        for ip in (self.bad_ip, self.offline_ip):
+            self.store.add_device(ip, pinned=True)
+            with patch.object(server, 'now', return_value=before):
+                self.store.record(ip, {'status': 'online', 'reachable': True, 'checked_at': before,
+                                       'metrics': {'power_w': {'value': 50, 'unit': 'W', 'label': 'Power'}}})
+        with patch.object(server, 'network_info', return_value={}):
+            self.collector = server.Collector(self.store)
+
+    def tearDown(self):
+        self.store.db.close()
+        self.tmp.cleanup()
+
+    def test_malformed_device_preserves_unknown_alert_and_does_not_block_other_alerts(self):
+        self.store.record(self.bad_ip, {'status': 'unreachable', 'reachable': False, 'checked_at': server.now(), 'metrics': {}})
+        self.store.update_alerts()
+        self.assertEqual(len(self.store.alerts()['open']), 1)
+        with patch.object(server, 'network_info', return_value={}), \
+             patch.object(server, 'ping', side_effect=lambda ip: (ip == self.bad_ip, None)), \
+             patch.object(server, 'port_open', side_effect=lambda ip: ip == self.bad_ip), \
+             patch.object(server.media_readers, 'select_reader', return_value=None), \
+             patch.object(server, 'read_json', side_effect=[{'type': 'SHSW-1'}, {'tmp': 'malformed'}]):
+            self.collector.poll()
+        self.assertTrue(self.collector.has_completed_cycle)
+        self.assertIsNone(self.collector.state['collection_error'])
+        devices = {device['ip']: device for device in self.store.devices()}
+        self.assertEqual(devices[self.bad_ip]['status'], 'error')
+        self.assertIsNone(devices[self.bad_ip]['reachable'])
+        self.assertEqual(devices[self.bad_ip]['metrics'], {})
+        self.assertEqual(devices[self.bad_ip]['last_metrics']['power_w']['value'], 50)
+        self.assertIn('could not be read', devices[self.bad_ip]['error'])
+        self.assertEqual({alert['device_id'] for alert in self.store.alerts()['open']},
+                         {device['device_id'] for device in devices.values()})
+
+    def test_storage_failure_still_fails_the_cycle_without_evaluating_alerts(self):
+        result = {'status': 'unreachable', 'reachable': False, 'checked_at': server.now(), 'metrics': {}}
+        with patch.object(server, 'network_info', return_value={}), patch.object(server, 'probe_device', return_value=result), \
+             patch.object(self.store, 'record', side_effect=sqlite3.OperationalError('disk error')), \
+             patch.object(self.store, 'update_alerts') as evaluate:
+            self.collector.poll()
+        self.assertFalse(self.collector.has_completed_cycle)
+        self.assertIn('could not be saved', self.collector.state['collection_error'])
+        evaluate.assert_not_called()
 
 
 class StorageTests(unittest.TestCase):

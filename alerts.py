@@ -8,28 +8,39 @@ as a recovery.
 from __future__ import annotations
 
 import base64
+import hashlib
 import ipaddress
 import json
 import os
-import queue
 import re
 import secrets
+import sqlite3
 import stat
 import tempfile
 import threading
-from datetime import datetime, timezone
+from contextlib import closing
+from datetime import datetime, timedelta, timezone
+from http.client import HTTPException
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
+OUTBOX_SCHEMA = '''
+  CREATE TABLE IF NOT EXISTS alert_deliveries (
+    event_id TEXT PRIMARY KEY, alert_key TEXT NOT NULL, payload TEXT NOT NULL,
+    destination_key TEXT NOT NULL, created_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT NOT NULL, last_attempt_at TEXT, last_error TEXT, sent_at TEXT);
+  CREATE INDEX IF NOT EXISTS alert_deliveries_due ON alert_deliveries(status, next_attempt_at);
+'''
 SCHEMA = '''
   CREATE TABLE IF NOT EXISTS alerts (id INTEGER PRIMARY KEY, rule TEXT NOT NULL, device_id INTEGER NOT NULL,
     subject TEXT NOT NULL DEFAULT '', severity TEXT NOT NULL, summary TEXT NOT NULL, opened_at TEXT NOT NULL,
     updated_at TEXT NOT NULL, resolved_at TEXT, acknowledged_at TEXT);
   CREATE UNIQUE INDEX IF NOT EXISTS alerts_open ON alerts(rule, device_id, subject) WHERE resolved_at IS NULL;
   CREATE INDEX IF NOT EXISTS alerts_resolved ON alerts(resolved_at);
-'''
+''' + OUTBOX_SCHEMA
 
 DEFAULT_SETTINGS = {
     'device_offline': {'enabled': True, 'minutes': 10},
@@ -66,6 +77,10 @@ SENSOR_READING_MAX_AGE = 48 * 3600  # Sleeping sensors report rarely; older batt
 RESOLVED_HISTORY_DAYS = 7
 WEBHOOK_TIMEOUT = 5
 WEBHOOK_FORMATS = ('ntfy', 'json')
+RETRY_DELAYS = (30, 120, 600, 1800, 7200, 21600, 43200)
+MAX_DELIVERY_ATTEMPTS = len(RETRY_DELAYS) + 1
+MAX_PENDING_DELIVERIES = 200
+DELIVERY_HISTORY_DAYS = 7
 RFC1918 = [ipaddress.ip_network(x) for x in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')]
 
 
@@ -231,8 +246,8 @@ def title_for(rule, subject, settings):
 def _evaluate_custom(devices, settings, at, open_keys, tracker, active, cleared, scope):
     """Custom rules must hold for their duration before opening, and be clear as long before clearing.
 
-    tracker maps a rule's key to (breaching, since, limit): when the latest fresh reading entered
-    its current state. It lives in memory, so a restart waits a full duration again.
+    tracker maps a rule's key to (breaching, since, limit): when this collector first observed
+    its current state. A restart or unknown interval waits a full duration again.
     """
     by_id = {device['device_id']: device for device in devices}
     live = set()
@@ -247,13 +262,14 @@ def _evaluate_custom(devices, settings, at, open_keys, tracker, active, cleared,
         value, reported = reading.get('value'), reading.get('reported_at')
         age = _age_seconds(reported, at)
         fresh_for = SLEEPING_FRESH_SECONDS if device.get('expected_sleep') else FRESH_SECONDS
-        if not number(value) or age is None or age > fresh_for:
-            continue  # Unknown: leave any open alert and the timer as they are.
+        if device.get('status') == 'error' or not number(value) or age is None or age > fresh_for:
+            tracker.pop(key, None)
+            continue  # Unknown: retain any open alert, but cannot count the gap toward a duration.
         breaching = value < rule['value'] if rule['op'] == 'below' else value > rule['value']
-        limit = (rule['op'], rule['value'])
+        limit = (rule['metric'], rule['op'], rule['value'], rule['minutes'])
         state = tracker.get(key)
         if state is None or state[0] != breaching or state[2] != limit:
-            state = tracker[key] = (breaching, reported, limit)
+            state = tracker[key] = (breaching, at.isoformat(), limit)
         held = (_age_seconds(state[1], at) or 0) >= rule['minutes'] * 60
         if breaching and (held or key in open_keys):
             relation = 'below' if rule['op'] == 'below' else 'above'
@@ -443,6 +459,7 @@ def acknowledge(db, alert_id, at):
 
 def cleanup(db, cutoff):
     db.execute('DELETE FROM alerts WHERE resolved_at IS NOT NULL AND resolved_at < ?', (cutoff,))
+    db.execute("DELETE FROM alert_deliveries WHERE status IN ('sent','failed','cancelled') AND created_at < ?", (cutoff,))
 
 
 # Webhook delivery ------------------------------------------------------------------------
@@ -464,6 +481,8 @@ def validate_url(url):
         raise ValueError('Use an http:// or https:// webhook URL.')
     if parts.username or parts.password:
         raise ValueError('Put credentials in the URL path or token, not before the host name.')
+    if parts.fragment:
+        raise ValueError('Webhook URLs cannot include a fragment after #.')
     if port == 0:
         raise ValueError('Enter a valid webhook port.')
     if parts.scheme == 'http':
@@ -475,7 +494,19 @@ def validate_url(url):
         private = address is not None and address.version == 4 and (address.is_loopback or any(address in net for net in RFC1918))
         if not private and parts.hostname.lower() != 'localhost':
             raise ValueError('Use https:// for webhooks outside your local network. Plain http:// is limited to private IPv4 addresses.')
-    return url
+    # urllib does not encode internationalized hosts or paths itself. Normalize before
+    # saving so a valid-looking URL cannot kill the worker with UnicodeEncodeError.
+    try:
+        host = parts.hostname.encode('idna').decode('ascii')
+        if ':' in host:
+            ipaddress.IPv6Address(host)
+            host = f'[{host}]'
+        netloc = host + (f':{port}' if port else '')
+        return urlunsplit((parts.scheme, netloc,
+                          quote(parts.path, safe="/:@!$&'()*+,;=-._~%"),
+                          quote(parts.query, safe="/?:@!$&'()*+,;=-._~%"), ''))
+    except (UnicodeError, ValueError):
+        raise ValueError('Enter a valid webhook URL.') from None
 
 
 def destination(url):
@@ -511,6 +542,7 @@ def save_webhook(database, url, fmt):
     path = webhook_path(database)
     if url is None:
         path.unlink(missing_ok=True)
+        cancel_deliveries(database)
         return None
     if fmt not in WEBHOOK_FORMATS:
         raise ValueError('Choose ntfy or JSON delivery.')
@@ -525,6 +557,7 @@ def save_webhook(database, url, fmt):
         pending.replace(path)
     finally:
         pending.unlink(missing_ok=True)
+    cancel_deliveries(database, destination_key(config))
     return config
 
 
@@ -550,10 +583,12 @@ def request_for(config, note):
         body = note['text'].encode()
     else:
         headers = {'Content-Type': 'application/json'}
-        body = json.dumps({'source': 'Local Signal', 'text': note['text'],
+        body = json.dumps({'source': 'Local Signal', 'text': note['text'], 'event_id': note.get('event_id'),
                            **{key: note.get(key) for key in ('event', 'rule', 'severity', 'title', 'summary', 'device',
                                                              'opened_at', 'resolved_at')}}).encode()
     headers['User-Agent'] = 'Local-Signal-Alerts/1.0'
+    if note.get('event_id'):
+        headers['X-Local-Signal-Event'] = note['event_id']
     return Request(config['url'], data=body, headers=headers, method='POST')
 
 
@@ -568,60 +603,193 @@ def send(config, note, timeout=WEBHOOK_TIMEOUT):
         exc.close()
         raise WebhookError(f'The webhook returned HTTP {exc.code}; redirects are not followed.' if 300 <= exc.code < 400
                            else f'The webhook returned HTTP {exc.code}.') from None
-    except (URLError, OSError) as exc:
-        reason = getattr(exc, 'reason', exc)
-        raise WebhookError(f'Could not reach the webhook: {str(reason)[:160]}') from None
+    except (URLError, OSError):
+        # Transport exception text may contain the URL's private path/token.
+        raise WebhookError('Could not reach the webhook. Check the connection and destination.') from None
+    except (ValueError, UnicodeError, HTTPException):
+        raise WebhookError('The webhook request could not be sent. Check its URL and server response.') from None
 
 
 def now():
     return datetime.now(timezone.utc).isoformat(timespec='seconds')
 
 
+def destination_key(config):
+    """Bind pending events to their configured recipient without storing its secret URL."""
+    return hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
+
+
+def cancel_deliveries(database, keep_destination=None):
+    """Removing/replacing a webhook must never send its backlog to a different recipient."""
+    path = Path(database)
+    if not path.is_file():
+        return
+    with closing(sqlite3.connect(path, timeout=5)) as db, db:
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE name='alert_deliveries'").fetchone():
+            return
+        query = "UPDATE alert_deliveries SET status='cancelled', last_error=NULL WHERE status IN ('pending','retry','sending')"
+        if keep_destination is None:
+            db.execute(query)
+        else:
+            db.execute(query + ' AND destination_key<>?', (keep_destination,))
+
+
+def queue_notifications(db, notes, database, at):
+    """Persist events inside the alert transaction; replaying the same event is idempotent.
+
+    Only events observed with a configured webhook are queued. Later setup never backfills
+    earlier alerts. The outbox contains only the same redacted payload sent to the webhook.
+    """
+    if not notes:
+        return
+    try:
+        config = load_webhook(database)
+    except WebhookError:
+        return  # The API already exposes the invalid configuration for repair.
+    if config is None:
+        return
+    recipient = destination_key(config)
+    waiting = db.execute("SELECT COUNT(*) FROM alert_deliveries WHERE status IN ('pending','retry','sending')").fetchone()[0]
+    for note in notes:
+        alert_key = f'{note["id"]}:{note["opened_at"]}'
+        event_id = hashlib.sha256(f'{alert_key}:{note["event"]}'.encode()).hexdigest()
+        payload = {key: value for key, value in note.items() if key != 'ip'}
+        payload['event_id'] = event_id
+        full = waiting >= MAX_PENDING_DELIVERIES
+        inserted = db.execute('''INSERT OR IGNORE INTO alert_deliveries
+            (event_id,alert_key,payload,destination_key,created_at,status,next_attempt_at,last_error)
+            VALUES(?,?,?,?,?,?,?,?)''',
+            (event_id, alert_key, json.dumps(payload), recipient, at, 'failed' if full else 'pending', at,
+             'Notification queue is full. This event was not delivered.' if full else None)).rowcount
+        if inserted and not full:
+            waiting += 1
+
+
 class Notifier:
-    """Deliver alert notifications in the background so slow webhooks never delay collection."""
+    """Deliver the SQLite outbox without holding the collector's database lock during HTTP.
+
+    Delivery is at least once: a crash after the receiver accepts a request can cause a
+    retry. Every attempt carries the same event ID for receiver-side deduplication.
+    """
 
     def __init__(self, database):
         self.database = Path(database)
-        self.queue = queue.Queue(maxsize=200)
         self.lock = threading.Lock()
         self.state = {'last_sent_at': None, 'last_error': None, 'last_error_at': None, 'dropped': 0}
+        self.worker_error = None
+        with closing(self.connect()) as db:
+            db.executescript(OUTBOX_SCHEMA)
+
+    def connect(self):
+        db = sqlite3.connect(self.database, timeout=5)
+        db.row_factory = sqlite3.Row
+        return db
 
     def enqueue(self, notes):
-        for note in notes:
-            try:
-                self.queue.put_nowait(note)
-            except queue.Full:
-                with self.lock:
-                    self.state['dropped'] += 1
+        # Retained for callers outside Store; normal collection queues atomically in Store.
+        with closing(self.connect()) as db, db:
+            queue_notifications(db, notes, self.database, now())
 
     def deliver(self, note):
+        """Send an explicit test immediately; production events use process_pending()."""
         try:
             config = load_webhook(self.database)
             if config is None:
                 return False
             send(config, note)
-        except WebhookError as exc:
+        except Exception as exc:
+            error = str(exc) if isinstance(exc, WebhookError) else 'The notification could not be sent. Check the webhook configuration.'
             with self.lock:
-                self.state.update(last_error=str(exc), last_error_at=now())
-            raise
+                self.state.update(last_error=error, last_error_at=now())
+            raise WebhookError(error) from None
         with self.lock:
             self.state.update(last_sent_at=now(), last_error=None, last_error_at=None)
+        return True
+
+    def process_pending(self, at=None):
+        """Attempt one due event, returning whether work was done. Safe to call after restart."""
+        at = at or datetime.now(timezone.utc)
+        stamp = at.isoformat(timespec='seconds')
+        with closing(self.connect()) as db:
+            # Claim one row atomically. An abandoned claim becomes eligible after a minute.
+            db.execute('BEGIN IMMEDIATE')
+            cutoff = (at - timedelta(days=DELIVERY_HISTORY_DAYS)).isoformat(timespec='seconds')
+            db.execute("DELETE FROM alert_deliveries WHERE status IN ('sent','failed','cancelled') AND created_at<?", (cutoff,))
+            row = db.execute('''SELECT rowid,* FROM alert_deliveries AS candidate
+                WHERE status IN ('pending','retry','sending') AND next_attempt_at<=?
+                AND NOT EXISTS (SELECT 1 FROM alert_deliveries AS earlier
+                    WHERE earlier.alert_key=candidate.alert_key AND earlier.rowid<candidate.rowid
+                    AND earlier.status IN ('pending','retry','sending'))
+                ORDER BY rowid LIMIT 1''', (stamp,)).fetchone()
+            if row is None:
+                db.commit()
+                return False
+            attempts = row['attempts'] + 1
+            if attempts > MAX_DELIVERY_ATTEMPTS:
+                db.execute("UPDATE alert_deliveries SET status='failed',last_error=? WHERE event_id=?",
+                           ('Delivery stopped after repeated interrupted attempts.', row['event_id']))
+                db.commit()
+                return True
+            db.execute("UPDATE alert_deliveries SET status='sending',attempts=?,last_attempt_at=?,next_attempt_at=? WHERE event_id=?",
+                       (attempts, stamp, (at + timedelta(seconds=60)).isoformat(timespec='seconds'), row['event_id']))
+            db.commit()
+        try:
+            config = load_webhook(self.database)
+            if config is None or destination_key(config) != row['destination_key']:
+                status, error = 'cancelled', None
+            else:
+                send(config, json.loads(row['payload']))
+                status, error = 'sent', None
+        except Exception as exc:
+            error = str(exc) if isinstance(exc, WebhookError) else 'The notification could not be sent. Check the webhook configuration.'
+            status = 'failed' if attempts >= MAX_DELIVERY_ATTEMPTS else 'retry'
+        retry = (at + timedelta(seconds=RETRY_DELAYS[min(attempts - 1, len(RETRY_DELAYS) - 1)])).isoformat(timespec='seconds')
+        with closing(self.connect()) as db, db:
+            # A simultaneous webhook removal/replacement may have cancelled this claim.
+            db.execute('''UPDATE alert_deliveries SET status=?,last_error=?,next_attempt_at=?,sent_at=?
+                WHERE event_id=? AND status='sending' ''',
+                (status, error, retry if status == 'retry' else stamp, stamp if status == 'sent' else None, row['event_id']))
+        if status == 'sent':
+            with self.lock:
+                self.state.update(last_error=None, last_error_at=None)
         return True
 
     def run(self, stop):
         while not stop.is_set():
             try:
-                note = self.queue.get(timeout=1)
-            except queue.Empty:
-                continue
-            try:
-                self.deliver(note)
-            except WebhookError as exc:
-                print(f'Alert notification failed: {exc}', flush=True)
+                worked = self.process_pending()
+                with self.lock:
+                    self.worker_error = None
+                if worked:
+                    continue
+            except Exception:
+                # Storage/configuration failures must not silently terminate delivery.
+                with self.lock:
+                    self.worker_error = {'last_error': 'Notification delivery needs attention; it will retry.', 'last_error_at': now()}
+            stop.wait(1)
 
     def snapshot(self):
         with self.lock:
-            return dict(self.state)
+            result = dict(self.state)
+            if self.worker_error:
+                result.update(self.worker_error)
+        result.update(pending=0, retrying=0, failed=0, next_retry_at=None)
+        try:
+            with closing(self.connect()) as db:
+                counts = dict(db.execute('SELECT status,COUNT(*) FROM alert_deliveries GROUP BY status'))
+                result.update(pending=counts.get('pending', 0) + counts.get('sending', 0),
+                              retrying=counts.get('retry', 0), failed=counts.get('failed', 0))
+                sent = db.execute('SELECT MAX(sent_at) FROM alert_deliveries').fetchone()[0]
+                result['last_sent_at'] = max(filter(None, (sent, result['last_sent_at'])), default=None)
+                result['next_retry_at'] = db.execute("SELECT MIN(next_attempt_at) FROM alert_deliveries WHERE status='retry'").fetchone()[0]
+                error = db.execute("""SELECT last_error,COALESCE(last_attempt_at,created_at) AS at FROM alert_deliveries
+                    WHERE status IN ('retry','failed') AND last_error IS NOT NULL ORDER BY at DESC LIMIT 1""").fetchone()
+                if error and (not result['last_error_at'] or error['at'] >= result['last_error_at']):
+                    result.update(last_error=error['last_error'], last_error_at=error['at'])
+                result['dropped'] = db.execute("SELECT COUNT(*) FROM alert_deliveries WHERE status='failed' AND attempts=0").fetchone()[0]
+        except sqlite3.Error:
+            result.update(last_error='Notification delivery status could not be read.', last_error_at=now())
+        return result
 
 
 TEST_NOTE = {'event': 'test', 'rule': 'test', 'severity': 'info', 'title': 'Local Signal test',

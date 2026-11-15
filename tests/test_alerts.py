@@ -45,6 +45,9 @@ class Ledger:
         self.db.row_factory = sqlite3.Row
         self.db.executescript(alerts.SCHEMA)
 
+    def __del__(self):
+        self.db.close()
+
     def run(self, devices, settings=DEFAULTS, at=AT):
         evaluation = alerts.evaluate(devices, settings, at, alerts.open_keys(self.db))
         return alerts.sync(self.db, evaluation, devices, at.isoformat(timespec='seconds'))
@@ -282,6 +285,30 @@ class CustomRuleTests(unittest.TestCase):
         alerts.evaluate(self.reading(5, 0), DEFAULTS, AT, set(), tracker)
         self.assertEqual(tracker, {})
 
+    def test_restart_waits_full_duration_even_when_persisted_reading_is_older(self):
+        settings, ledger, tracker = custom_settings(minutes=15), Ledger(), {}
+        # First evaluation after restart sees a reading from twenty minutes earlier.
+        self.assertEqual(self.run_at(ledger, self.reading(5, 0), settings, 20, tracker), [])
+        self.assertEqual(self.run_at(ledger, self.reading(5, 34), settings, 34, tracker), [])
+        self.assertEqual([n['event'] for n in self.run_at(ledger, self.reading(5, 35), settings, 35, tracker)], ['opened'])
+
+    def test_unknown_gap_restarts_duration_and_never_clears_an_open_alert(self):
+        settings, ledger, tracker = custom_settings(minutes=5), Ledger(), {}
+        self.run_at(ledger, self.reading(5, 0), settings, 0, tracker)
+        failed = [{**self.reading(5, 0)[0], 'status': 'error'}]
+        self.assertEqual(self.run_at(ledger, failed, settings, 4, tracker), [])
+        self.assertEqual(tracker, {})
+        self.assertEqual(self.run_at(ledger, self.reading(5, 6), settings, 6, tracker), [])
+        self.assertEqual([n['event'] for n in self.run_at(ledger, self.reading(5, 11), settings, 11, tracker)], ['opened'])
+        failed_recovery = [{**self.reading(12, 12)[0], 'status': 'error'}]
+        self.assertEqual(self.run_at(ledger, failed_recovery, settings, 20, tracker), [])
+        self.assertEqual(len(ledger.open()), 1)
+        self.assertEqual(self.run_at(ledger, self.reading(12, 21), settings, 21, tracker), [])
+        # Another stale interval also invalidates the pending recovery timer.
+        self.assertEqual(self.run_at(ledger, self.reading(12, 21), settings, 60, tracker), [])
+        self.assertEqual(self.run_at(ledger, self.reading(12, 61), settings, 61, tracker), [])
+        self.assertEqual([n['event'] for n in self.run_at(ledger, self.reading(12, 66), settings, 66, tracker)], ['resolved'])
+
     def test_store_rules_survive_restart_and_reject_unreported_readings(self):
         with tempfile.TemporaryDirectory() as folder:
             store = server.Store(Path(folder) / 'custom.sqlite3')
@@ -332,9 +359,19 @@ class WebhookTests(unittest.TestCase):
         for url in ('https://ntfy.sh/topic', 'http://192.168.1.20:8123/api/webhook/x', 'http://localhost:8080/x'):
             self.assertEqual(alerts.validate_url(url), url)
         for url in ('http://ntfy.sh/topic', 'http://8.8.8.8/x', 'ftp://192.168.1.2/x', 'https://user:pw@example.com/x',
-                    'https://example.com/a b', 'not a url', 'https://', None, 'https://example.com:0/x'):
+                    'https://example.com/a b', 'not a url', 'https://', None, 'https://example.com:0/x',
+                    'https://example.com/#secret', 'https://example.com/\ud800'):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 alerts.validate_url(url)
+
+    def test_unicode_urls_are_normalized_before_delivery(self):
+        self.assertEqual(alerts.validate_url('https://例え.テスト/通知?q=café'),
+                         'https://xn--r8jz45g.xn--zckzah/%E9%80%9A%E7%9F%A5?q=caf%C3%A9')
+        normalized = alerts.validate_url(self.url + '/通知')
+        alerts.send({'url': normalized, 'format': 'json'}, self.note)
+        self.assertEqual(self.httpd.received[0][0], '/alerts/%E9%80%9A%E7%9F%A5')
+        with self.assertRaises(alerts.WebhookError):
+            alerts.send({'url': self.url + '/通知', 'format': 'json'}, self.note)
 
     def test_ntfy_delivery_sends_text_title_and_priority(self):
         alerts.send({'url': self.url, 'format': 'ntfy'}, {**self.note, 'title': 'Café UPS'})
@@ -386,6 +423,148 @@ class WebhookTests(unittest.TestCase):
         self.assertIn('"alerts.py"', pyproject)
 
 
+class DeliveryOutboxTests(unittest.TestCase):
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.database = Path(folder.name) / 'outbox.sqlite3'
+        self.notifier = alerts.Notifier(self.database)
+        self.url = 'https://example.invalid/private-topic'
+        alerts.save_webhook(self.database, self.url, 'json')
+        self.note = Ledger().run([ups(state='On battery', charge=90)])[0]
+
+    def queue(self, notes=None, at=AT):
+        db = self.notifier.connect()
+        try:
+            with db:
+                alerts.queue_notifications(db, [self.note] if notes is None else notes, self.database, at.isoformat(timespec='seconds'))
+        finally:
+            db.close()
+
+    def rows(self):
+        db = self.notifier.connect()
+        try:
+            return [dict(row) for row in db.execute('SELECT * FROM alert_deliveries ORDER BY rowid')]
+        finally:
+            db.close()
+
+    def test_failed_delivery_survives_restart_retries_when_due_and_deduplicates(self):
+        self.queue()
+        self.queue()
+        self.assertEqual(self.notifier.snapshot()['pending'], 1)
+        with patch.object(alerts, 'send', side_effect=alerts.WebhookError('Temporary outage')) as send:
+            self.assertTrue(self.notifier.process_pending(AT))
+            self.assertEqual(send.call_count, 1)
+        first_id = self.rows()[0]['event_id']
+        restarted = alerts.Notifier(self.database)
+        self.assertEqual(restarted.snapshot()['retrying'], 1)
+        self.assertEqual(restarted.snapshot()['next_retry_at'], (AT + timedelta(seconds=30)).isoformat(timespec='seconds'))
+        with patch.object(alerts, 'send') as send:
+            self.assertFalse(restarted.process_pending(AT + timedelta(seconds=29)))
+            self.assertTrue(restarted.process_pending(AT + timedelta(seconds=30)))
+            self.assertEqual(send.call_args.args[1]['event_id'], first_id)
+        self.queue()
+        self.assertEqual(len(self.rows()), 1)
+        self.assertEqual(self.rows()[0]['status'], 'sent')
+        self.assertEqual((restarted.snapshot()['pending'], restarted.snapshot()['retrying']), (0, 0))
+        self.assertIsNone(restarted.snapshot()['last_error'])
+        payload = self.rows()[0]['payload']
+        self.assertNotIn('10.23.0', payload)
+        self.assertNotIn('private-topic', json.dumps(self.rows()))
+
+    def test_retry_limit_is_bounded_and_failure_remains_visible(self):
+        self.queue()
+        at = AT
+        with patch.object(alerts, 'send', side_effect=alerts.WebhookError('Unavailable')) as send:
+            for attempt in range(alerts.MAX_DELIVERY_ATTEMPTS):
+                self.assertTrue(self.notifier.process_pending(at))
+                if attempt < len(alerts.RETRY_DELAYS):
+                    at += timedelta(seconds=alerts.RETRY_DELAYS[attempt])
+            self.assertFalse(self.notifier.process_pending(at + timedelta(seconds=1)))
+            self.assertEqual(send.call_count, 8)
+        state = alerts.Notifier(self.database).snapshot()
+        self.assertEqual((state['failed'], state['retrying'], state['last_error']), (1, 0, 'Unavailable'))
+
+    def test_removal_replacement_and_manual_config_changes_cancel_old_recipient(self):
+        self.queue()
+        alerts.save_webhook(self.database, 'https://example.invalid/different-topic', 'json')
+        self.assertEqual(self.rows()[0]['status'], 'cancelled')
+        self.queue([{**self.note, 'id': 2}])
+        alerts.save_webhook(self.database, None, None)
+        alerts.save_webhook(self.database, 'https://example.invalid/different-topic', 'json')
+        self.assertTrue(all(row['status'] == 'cancelled' for row in self.rows()))
+        self.queue([{**self.note, 'id': 3}])
+        # Even configuration edited outside the API cannot reroute a pending payload.
+        alerts.webhook_path(self.database).write_text(json.dumps({'url': self.url, 'format': 'json'}))
+        with patch.object(alerts, 'send') as send:
+            self.assertTrue(self.notifier.process_pending(AT))
+            send.assert_not_called()
+        self.assertTrue(all(row['status'] == 'cancelled' for row in self.rows()))
+
+    def test_queue_without_configuration_does_not_backfill_and_capacity_is_visible(self):
+        alerts.save_webhook(self.database, None, None)
+        self.queue()
+        alerts.save_webhook(self.database, self.url, 'json')
+        self.assertEqual(self.rows(), [])
+        with patch.object(alerts, 'MAX_PENDING_DELIVERIES', 1):
+            self.queue()
+            self.queue()  # Duplicate cannot consume capacity or change the pending event.
+            self.queue([{**self.note, 'id': 2}])
+        state = self.notifier.snapshot()
+        self.assertEqual((state['pending'], state['failed'], state['dropped']), (1, 1, 1))
+
+    def test_recovery_event_waits_for_its_opening_delivery(self):
+        self.queue()
+        with patch.object(alerts, 'send', side_effect=alerts.WebhookError('Offline')):
+            self.notifier.process_pending(AT)
+        self.queue([{**self.note, 'event': 'resolved', 'resolved_at': (AT + timedelta(seconds=10)).isoformat()}],
+                   AT + timedelta(seconds=10))
+        with patch.object(alerts, 'send') as send:
+            self.assertFalse(self.notifier.process_pending(AT + timedelta(seconds=10)))
+            self.assertTrue(self.notifier.process_pending(AT + timedelta(seconds=30)))
+            self.assertTrue(self.notifier.process_pending(AT + timedelta(seconds=30)))
+            self.assertEqual([call.args[1]['event'] for call in send.call_args_list], ['opened', 'resolved'])
+
+    def test_abandoned_claim_is_recovered_after_restart(self):
+        self.queue()
+        db = self.notifier.connect()
+        try:
+            with db:
+                db.execute("UPDATE alert_deliveries SET status='sending', attempts=1, next_attempt_at=?",
+                           ((AT + timedelta(seconds=60)).isoformat(timespec='seconds'),))
+        finally:
+            db.close()
+        restarted = alerts.Notifier(self.database)
+        with patch.object(alerts, 'send') as send:
+            self.assertFalse(restarted.process_pending(AT + timedelta(seconds=59)))
+            self.assertTrue(restarted.process_pending(AT + timedelta(seconds=60)))
+            send.assert_called_once()
+        self.assertEqual(self.rows()[0]['attempts'], 2)
+
+    def test_unexpected_send_exception_is_contained_and_worker_recovers(self):
+        self.queue()
+        with patch.object(alerts, 'send', side_effect=UnicodeError('private-token')):
+            self.assertTrue(self.notifier.process_pending(AT))
+            with self.assertRaises(alerts.WebhookError):
+                self.notifier.deliver(alerts.TEST_NOTE)
+        self.assertNotIn('private-token', json.dumps(self.notifier.snapshot()))
+        with patch.object(alerts, 'send') as send:
+            self.assertTrue(self.notifier.process_pending(AT + timedelta(seconds=30)))
+            send.assert_called_once()
+        stop = threading.Event()
+        calls = []
+        def cycle():
+            calls.append(1)
+            if len(calls) == 1:
+                raise sqlite3.OperationalError('private path')
+            stop.set()
+            return False
+        with patch.object(self.notifier, 'process_pending', side_effect=cycle), patch.object(stop, 'wait'):
+            self.notifier.run(stop)
+        self.assertEqual(len(calls), 2)
+        self.assertIsNone(self.notifier.snapshot()['last_error'])
+
+
 class StoreAlertTests(unittest.TestCase):
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()
@@ -416,6 +595,21 @@ class StoreAlertTests(unittest.TestCase):
         self.assertEqual([a['id'] for a in self.store.alerts()['recent']], [alert_id])
         self.assertFalse(self.store.acknowledge_alert(alert_id))
 
+    def test_outbox_is_atomic_with_alert_and_malformed_webhook_keeps_dashboard_alerts(self):
+        alerts.save_webhook(self.store.path, 'https://example.invalid/test', 'json')
+        self.record('On battery')
+        with patch.object(alerts, 'queue_notifications', side_effect=sqlite3.OperationalError('locked')):
+            with self.assertRaises(sqlite3.OperationalError):
+                self.store.update_alerts()
+        self.assertEqual(self.store.alerts()['open'], [])
+        self.assertEqual(self.store.events(kind='alert_opened'), [])
+        alerts.webhook_path(self.store.path).write_text('{malformed')
+        self.assertEqual(len(self.store.update_alerts()), 1)
+        self.assertEqual(len(self.store.alerts()['open']), 1)
+        self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM alert_deliveries').fetchone()[0], 0)
+        alerts.save_webhook(self.store.path, 'https://example.invalid/test', 'json')
+        self.assertEqual(self.store.update_alerts(), [])  # Repair does not backfill old transitions.
+
     def test_existing_database_gains_the_alerts_table_and_keeps_settings(self):
         self.store.save_setting('retention_days', 9)
         self.store.db.execute('DROP TABLE alerts')
@@ -437,17 +631,18 @@ class StoreAlertTests(unittest.TestCase):
         self.assertEqual([r[0] for r in self.store.db.execute('SELECT rule FROM alerts')], ['ups_on_battery'])
 
     def test_collector_waits_for_a_completed_cycle_and_survives_alert_errors(self):
+        alerts.save_webhook(self.store.path, 'https://example.invalid/test', 'json')
         with patch.object(server, 'network_info', return_value={}):
             collector = server.Collector(self.store)
         self.record('On battery')
         collector.evaluate_alerts()
-        self.assertEqual(collector.notifier.queue.qsize(), 0)
+        self.assertEqual(collector.notifier.snapshot()['pending'], 0)
         collector.has_completed_cycle = True
         with patch.object(self.store, 'update_alerts', side_effect=sqlite3.OperationalError('locked')):
             collector.evaluate_alerts()
         self.assertEqual(collector.state['alert_error'], 'locked')
         collector.evaluate_alerts()
-        self.assertEqual((collector.notifier.queue.qsize(), collector.state['alert_error']), (1, None))
+        self.assertEqual((collector.notifier.snapshot()['pending'], collector.state['alert_error']), (1, None))
 
 
 class AlertAPITests(unittest.TestCase):

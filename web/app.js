@@ -83,6 +83,7 @@ function statusInfo(d) {
  if(d.status==='online') return ['Reporting','online'];
  if(d.status==='reachable') return ['Reachable','reachable'];
  if(d.status==='auth_required') return ['Auth required','attention'];
+ if(d.status==='error') return ['Read failed','attention'];
  if(d.status==='unreachable' && d.expected_sleep) return ['May be asleep','sleeping'];
  if(d.status==='unreachable') return ['Unreachable','offline'];
  return ['Checking','pending'];
@@ -472,7 +473,11 @@ function settingsPage() {
 }
 const views={overview,devices:devicesPage,alerts:alertsPage,history:historyPage,network:networkPage,settings:settingsPage};
 function render() {
- const main=$('#main'), focused=document.activeElement, focusID=focused?.id, selection=focused?.selectionStart;
+ const main=$('#main'), focused=document.activeElement, focusID=focused?.id;
+ const focusForm=focused?.form?.id, focusName=focused?.name;
+ const focusIndex=focusForm ? [...focused.form.elements].indexOf(focused) : -1;
+ const selection=typeof focused?.selectionStart==='number'
+  ? [focused.selectionStart, focused.selectionEnd, focused.selectionDirection] : null;
  const cardSelector='details[data-inventory-id]';
  const cardId=focused?.closest(cardSelector)?.dataset.inventoryId;
  // Keep disclosure state and focus when polling replaces the inventory.
@@ -495,13 +500,20 @@ function render() {
  }
  $$('[data-color]',main).forEach(el=>{el.style.backgroundColor=el.dataset.color;});
  const card=cardId && $$(cardSelector,main).find(el=>el.dataset.inventoryId===cardId);
+ let control;
  if(card) {
-  const control=$(focused.tagName.toLowerCase(),card)||$('summary',card);
-  control.focus({preventScroll:true});
+  control=$(focused.tagName.toLowerCase(),card)||$('summary',card);
  } else if(focusID) {
-  const input=document.getElementById(focusID);
-  input?.focus({preventScroll:true});
-  if(input?.type==='search'&&typeof selection==='number')input.setSelectionRange(selection,selection);
+  control=document.getElementById(focusID);
+ } else if(focusForm) {
+  // Alert controls have names rather than IDs. Restore their identity within
+  // the form, including unnamed buttons, when a poll replaces the page.
+  const form=document.getElementById(focusForm);
+  control=(focusName && form?.elements.namedItem(focusName)) || form?.elements[focusIndex];
+ }
+ if(control?.focus) {
+  control.focus({preventScroll:true});
+  if(selection && typeof control.setSelectionRange==='function')control.setSelectionRange(...selection);
  }
 }
 function route() {
@@ -650,6 +662,9 @@ function webhookPanel(hook) {
   ? `<dl class="settings-list"><div><dt>Destination</dt><dd class="mono">${esc(hook.destination)}</dd></div><div><dt>Format</dt><dd>${hook.format==='json'?'JSON':'ntfy'}</dd></div><div><dt>Last delivered</dt><dd>${dateTime(hook.last_sent_at)}</dd></div></dl>`
   : `<p class="collection-note">No webhook is set up. Alerts appear on this page, in the overview, and in the activity log.</p>`;
  const problem = hook.error || hook.last_error;
+ const pending=(Number(hook.pending)||0)+(Number(hook.retrying)||0), failed=Number(hook.failed)||0;
+ const delivery = hook.configured ? `<p class="collection-note">${pending} notification${pending===1?'':'s'} pending${hook.retrying?` · ${Number(hook.retrying)} waiting to retry`:''}${hook.next_retry_at?` · Next attempt ${dateTime(hook.next_retry_at)}`:''}.</p>
+  ${failed?`<div class="notice warning">${icon('info')}${failed} notification${failed===1?' was':'s were'} not delivered. Check the destination and use Send test to verify delivery.</div>`:''}` : '';
  const form = hook.editable ? `<form id="alert-webhook" class="alert-form" data-draft>
   <label>${hook.configured?'Replace webhook URL':'Webhook URL'}<input name="url" type="url" maxlength="2048" required autocomplete="off" spellcheck="false" placeholder="https://ntfy.sh/your-private-topic"></label>
   <label>Format<select name="format"><option value="ntfy" ${hook.format!=='json'?'selected':''}>ntfy — plain text with a title and priority</option><option value="json" ${hook.format==='json'?'selected':''}>JSON — for Home Assistant and other automations</option></select></label>
@@ -657,7 +672,7 @@ function webhookPanel(hook) {
   <div class="form-actions"><button class="button primary" type="submit">Save webhook</button>${hook.configured?`<button type="button" class="button secondary" id="webhook-test">Send test</button><button type="button" class="text-button" id="webhook-remove">Remove webhook</button>`:''}</div>
  </form>` : `<p class="collection-note">To change notification delivery, open the dashboard on the collector computer at localhost.</p>`;
  return `<section class="panel settings-panel"><div class="panel-heading"><div><h2>Notifications</h2><p>Send alerts to your phone or home automation.</p></div>${icon('wifi')}</div>
- ${status}${problem?`<div class="notice warning">${icon('info')}${esc(problem)}</div>`:''}${form}
+ ${status}${delivery}${problem?`<div class="notice warning">${icon('info')}${esc(problem)}</div>`:''}${form}
  <p class="collection-note">Notifications contain device names, rooms and alert text, never IP or MAC addresses. The URL is saved in a private file next to the database and isn’t shown again. Plain http:// is allowed only for private addresses.</p></section>`;
 }
 // Custom rules store limits in the reading's own unit; temperatures follow the °C/°F display choice.

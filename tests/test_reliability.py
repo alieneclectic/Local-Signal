@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from contextlib import closing
 import gzip
 from pathlib import Path
+import shutil
 import sqlite3
 import subprocess
 import tempfile
@@ -52,11 +53,14 @@ class BackupTests(unittest.TestCase):
         self.assertTrue(config['KeepAlive'])
         self.assertTrue(config['RunAtLoad'])
         self.assertIn('--background', config['ProgramArguments'])
+        self.assertEqual(config['ProgramArguments'][config['ProgramArguments'].index('--host') + 1], '127.0.0.1')
+        self.assertEqual(config['EnvironmentVariables']['LOCAL_SIGNAL_HOST'], '127.0.0.1')
         self.assertNotIn('/Volumes/', str(config))
         self.assertIn('/sbin', config['EnvironmentVariables']['PATH'])
         signed = background.agent_config(root / '.venv/bin/python', root / 'runtime', root / 'data/hearth.sqlite3', root / 'Hearth.app/Contents/MacOS/Hearth')
         self.assertEqual(signed['AssociatedBundleIdentifiers'], [background.LABEL])
         self.assertEqual(signed['ProgramArguments'], [str(root / 'Hearth.app/Contents/MacOS/Hearth')])
+        self.assertEqual(signed['EnvironmentVariables']['LOCAL_SIGNAL_HOST'], '127.0.0.1')
 
     def test_checkout_is_optional_and_preserves_the_installed_working_directory(self):
         root = Path('/Users/example/Library/Application Support/Hearth')
@@ -79,6 +83,41 @@ class BackupTests(unittest.TestCase):
                 (checkout / 'web/index.html').touch()
                 source, _ = dev.checkout_snapshot(checkout)
                 self.assertEqual(source, checkout)
+
+
+class DashboardSharingTests(unittest.TestCase):
+    def test_only_an_explicit_sharing_choice_survives_reinstall(self):
+        root = Path('/Users/example/Library/Application Support/Hearth')
+        legacy = {'ProgramArguments': ['python3', 'server.py', '--host', '0.0.0.0']}
+        self.assertEqual(background.collector_host(previous=legacy), '127.0.0.1')
+        shared = background.agent_config(root / '.venv/bin/python', root / 'runtime', root / 'data/hearth.sqlite3', host='0.0.0.0')
+        self.assertEqual(shared['ProgramArguments'][shared['ProgramArguments'].index('--host') + 1], '0.0.0.0')
+        self.assertEqual(background.collector_host(previous=shared), '0.0.0.0')
+        self.assertEqual(background.collector_host('127.0.0.1', shared), '127.0.0.1')
+        with self.assertRaises(ValueError):
+            background.collector_host(previous={'EnvironmentVariables': {'LOCAL_SIGNAL_HOST': 'example.com'}})
+
+    def test_installer_forwards_explicit_access_choice_without_installing(self):
+        for host in ('127.0.0.1', '0.0.0.0'):
+            with self.subTest(host=host), patch.object(background.sys, 'platform', 'darwin'), \
+                    patch.object(background.sys, 'argv', ['background.py', 'install', '--host', host, '--follow-checkout']), \
+                    patch.object(background, 'install') as install:
+                background.main()
+                install.assert_called_once_with(True, host=host)
+
+    @unittest.skipUnless(shutil.which('zsh'), 'macOS launcher requires zsh')
+    def test_start_script_forwards_server_flags_without_reusing_an_installed_collector(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            launcher = root / 'start.command'
+            launcher.write_bytes((background.ROOT / 'start.command').read_bytes())
+            python = root / '.venv/bin/python'
+            python.parent.mkdir(parents=True)
+            python.write_text('#!/bin/sh\nprintf \'%s\\n\' "$@"\n')
+            python.chmod(0o700)
+            result = subprocess.run([shutil.which('zsh'), str(launcher), '--host', '0.0.0.0', '--data', '/tmp/path with spaces/test.sqlite3'],
+                                    capture_output=True, text=True, timeout=5, check=True)
+            self.assertEqual(result.stdout.splitlines(), ['server.py', '--host', '0.0.0.0', '--data', '/tmp/path with spaces/test.sqlite3'])
 
 
 class LaunchdTests(unittest.TestCase):

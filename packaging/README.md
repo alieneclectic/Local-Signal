@@ -56,3 +56,5 @@ test_dir=$(mktemp -d)
 Open `http://127.0.0.1:8800`. Leave scan and refresh controls alone for a test without device access. The app installed by the PKG normally uses `~/Library/Application Support/Local Signal/data`.
 
 On a test Mac, install the PKG before checking login startup. Use the app executable's `--enable-background` option to register its login agent and `--disable-background` to remove it. Use `--port 8800` with `--enable-background` if port 8799 is occupied. Use a signed, notarized package to verify Local Network permission, read-only device collection, restart after failure, and upgrades before distribution.
+
+Login startup listens on `127.0.0.1` by default. To share the dashboard on a trusted local network, add `--host 0.0.0.0` to `--enable-background`. To change an existing login configuration, run `--disable-background`, then enable it with the desired host and port. Use `--host 127.0.0.1` to return to this computer only. The shared dashboard has no login; anyone who can reach it can view readings and edit local dashboard data.

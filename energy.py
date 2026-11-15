@@ -74,6 +74,11 @@ def summarize(readings, devices, settings, days=7, at=None):
         seconds = (stamp - start).total_seconds()
         if seconds <= 0 or stamp <= edges[0]:
             continue
+        if row.get('channels') != before.get('channels'):
+            # Cumulative totals with different channel membership are different counters.
+            # Establish a new baseline, including the first reading after an older version
+            # that did not record membership evidence.
+            continue
         delta = row['counter_kwh'] - before['counter_kwh']
         rebooted = row['uptime_s'] is not None and before['uptime_s'] is not None and row['uptime_s'] < before['uptime_s']
         if delta < 0 or rebooted:

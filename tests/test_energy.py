@@ -105,6 +105,51 @@ class EnergyStorageTests(unittest.TestCase):
         self.store.record(ip, {'status': 'online', 'reachable': True, 'checked_at': at, 'mac': mac,
                               'metrics': {'energy_kwh': {'value': counter, 'unit': 'kWh', 'label': 'Energy'}}})
 
+    def record_channels(self, status, seconds, info=None):
+        at = datetime.fromisoformat('2026-10-27T15:00:00+00:00') + timedelta(seconds=seconds)
+        self.store.record(DEVICE['ip'], {'status': 'online', 'reachable': True, 'checked_at': at.isoformat(),
+                                        'mac': DEVICE['mac'], 'metrics': server.normalize(info or {'type': 'SHSW-25'}, status)})
+
+    def summary(self):
+        self.store.heating_settings(SETTINGS)
+        window = energy.window(1, SETTINGS['timezone'], datetime.fromisoformat('2026-10-27T16:00:00+00:00'))
+        with patch.object(energy, 'window', return_value=window):
+            return self.store.energy_summary(1)
+
+    def test_invalid_channel_does_not_inflate_energy_when_it_returns(self):
+        self.record_channels({'meters': [{'total': 6000000}, {'total': 6000000}]}, 0)
+        self.record_channels({'meters': [{'total': 6000060}, {'total': 6000060, 'is_valid': False}]}, 30)
+        self.assertNotIn('energy_kwh', self.store.devices()[0]['metrics'])
+        self.record_channels({'meters': [{'total': 6000120}, {'total': 6000120}]}, 60)
+        self.assertEqual(self.summary()['total']['kwh'], .004)
+        self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM energy_readings').fetchone()[0], 2)
+
+    def test_missing_known_channel_stays_unknown_after_restart_until_it_returns(self):
+        self.record_channels({'switch:0': {'aenergy': {'total': 100000}}, 'switch:1': {'aenergy': {'total': 100000}}},
+                             0, {'gen': 2})
+        self.store.db.close()
+        self.store = server.Store(Path(self.tmp.name) / 'test.sqlite3')
+        self.record_channels({'switch:0': {'aenergy': {'total': 100001}}}, 30, {'gen': 2})
+        device, = self.store.devices()
+        self.assertNotIn('energy_kwh', device['metrics'])
+        self.assertEqual(device['latest_metrics']['energy_kwh']['value'], 200)
+        self.record_channels({'switch:0': {'aenergy': {'total': 100002}}, 'switch:1': {'aenergy': {'total': 100002}}},
+                             60, {'gen': 2})
+        self.assertEqual(self.summary()['total']['kwh'], .004)
+
+    def test_added_channel_starts_a_new_baseline_without_counting_its_existing_energy(self):
+        self.record_channels({'meters': [{'total': 6000000}]}, 0)
+        self.record_channels({'meters': [{'total': 6000060}, {'total': 3000000}]}, 30)
+        self.record_channels({'meters': [{'total': 6000120}, {'total': 3000060}]}, 60)
+        self.assertEqual(self.summary()['total']['kwh'], .002)
+
+    def test_upgrade_preserves_legacy_counter_inserts_and_baselines_new_membership(self):
+        self.record(DEVICE['ip'], '2026-10-27T15:00:00+00:00', 100)
+        self.record_channels({'meters': [{'total': 6000060}, {'total': 3000000}]}, 30)
+        self.record_channels({'meters': [{'total': 6000120}, {'total': 3000060}]}, 60)
+        self.assertEqual(self.summary()['total']['kwh'], .002)
+        self.assertEqual(self.store.db.execute('SELECT COUNT(*) FROM energy_readings').fetchone()[0], 3)
+
     def test_hardware_identity_survives_ip_change_without_cross_device_usage(self):
         new_ip = '10.23.0.11'
         self.record(DEVICE['ip'], '2026-10-27T15:00:00+00:00', 10)
