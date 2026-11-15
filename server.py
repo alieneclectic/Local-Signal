@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-from contextlib import closing
+from contextlib import closing, ExitStack
 import concurrent.futures
 import csv
 from datetime import datetime, timezone
@@ -1104,6 +1104,8 @@ class Collector:
                                 for adapter_id, adapter in routers.ADAPTERS.items()]
         self.network = network_info()
         self.stop = threading.Event()
+        self.workers_lock = threading.Lock()
+        self.workers = set()
         self.poll_lock = threading.Lock()
         self.scan_lock = threading.Lock()
         self.names_lock = threading.Lock()
@@ -1193,8 +1195,37 @@ class Collector:
                 self.poll_started = None
             self.poll_lock.release()
 
+    def start_task(self, target, *args):
+        """Track every background writer so shutdown can keep its database lease."""
+        def work():
+            try:
+                target(*args)
+            finally:
+                with self.workers_lock:
+                    self.workers.discard(threading.current_thread())
+        with self.workers_lock:
+            if self.stop.is_set():
+                return False
+            worker = threading.Thread(target=work, daemon=True)
+            self.workers.add(worker)
+            try:
+                worker.start()
+            except Exception:
+                self.workers.discard(worker)
+                raise
+        return True
+
+    def join_tasks(self):
+        while True:
+            with self.workers_lock:
+                workers = list(self.workers)
+            if not workers:
+                return
+            for worker in workers:
+                worker.join()
+
     def start_poll(self):
-        threading.Thread(target=self.poll, daemon=True).start()
+        return self.start_task(self.poll)
 
     def evaluate_alerts(self):
         if not self.has_completed_cycle:
@@ -1248,7 +1279,7 @@ class Collector:
             backup = reliability.backup_database(self.store.path, folder)
             self.store.save_setting('backup', backup)
             self.state.update(backup=backup, backup_error=None)
-        except (OSError, sqlite3.Error) as exc:
+        except (OSError, sqlite3.Error, reliability.RecoveryError) as exc:
             self.state['backup_error'] = str(exc)
             print(f'Database backup failed: {exc}', flush=True)
 
@@ -1262,7 +1293,10 @@ class Collector:
         if not self.names_lock.acquire(blocking=False):
             return False
         self.state['naming'] = True
-        threading.Thread(target=self.discover_names, daemon=True).start()
+        if not self.start_task(self.discover_names):
+            self.state['naming'] = False
+            self.names_lock.release()
+            return False
         return True
 
     def discover_names(self):
@@ -1285,7 +1319,10 @@ class Collector:
             return False
         with self.state_lock:
             self.state.update(scanning=True, scan_progress=0, scan_total=0, scan_error=None)
-        threading.Thread(target=self.scan, daemon=True).start()
+        if not self.start_task(self.scan):
+            self.state['scanning'] = False
+            self.scan_lock.release()
+            return False
         return True
 
     def scan(self):
@@ -1330,6 +1367,9 @@ class Collector:
 
 class Handler(SimpleHTTPRequestHandler):
     server_version = 'Hearth/1.0'
+    # Idle browser connections must not hold graceful shutdown and its database
+    # lease indefinitely. This also releases stalled request/export connections.
+    timeout = 10
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT / 'web'), **kwargs)
@@ -1534,7 +1574,7 @@ class Handler(SimpleHTTPRequestHandler):
                             store.reclaim_space()
                         except sqlite3.Error as exc:
                             print(f'Could not reclaim space after shortening history: {exc}', flush=True)
-                    threading.Thread(target=shorten, daemon=True).start()
+                    self.collector.start_task(shorten)
                 return self.send_json({'ok': True})
             if self.path == '/api/alerts/settings':
                 self.store.alert_settings(data)
@@ -1652,6 +1692,56 @@ class LocalHTTPServer(ThreadingHTTPServer):
         self.server_port = self.server_address[1]
 
 
+def database_maintenance(args, parser):
+    """Run local recovery commands without starting HTTP, discovery, or collection."""
+    folder = args.data.parent / 'backups'
+    try:
+        if args.list_backups:
+            files = [] if not folder.is_dir() else sorted(
+                (path for path in folder.iterdir() if path.is_file() and not path.is_symlink()
+                 and (path.name.endswith('.sqlite3') or path.name.endswith('.sqlite3.gz'))),
+                key=lambda path: path.stat().st_mtime, reverse=True)
+            print(json.dumps({'directory': str(folder.resolve()), 'backups': [
+                {'file': str(path.resolve()), 'bytes': path.stat().st_size} for path in files]}, indent=2))
+        elif args.inspect_backup:
+            print(json.dumps(reliability.inspect_backup(args.inspect_backup), indent=2))
+        elif args.restore_backup:
+            if args.apply:
+                print(json.dumps(reliability.restore_database(args.restore_backup, args.data), indent=2))
+            else:
+                print(json.dumps({'action': 'restore_preview', 'target': str(args.data.resolve()),
+                                  'replaces_existing_database': args.data.exists(),
+                                  'backup': reliability.inspect_backup(args.restore_backup),
+                                  'apply_required': True,
+                                  'credentials': 'Existing webhook and router credential files will be left unchanged.',
+                                  'notifications': 'Restored pending deliveries will be cancelled to prevent replay.'}, indent=2))
+        elif args.backup:
+            if not args.data.is_file():
+                parser.exit(1, f'No database found at {args.data}.\n')
+            result = reliability.backup_database(args.data, folder, manual=True)
+            print(json.dumps({**result, 'path': str((folder / result['file']).resolve()),
+                              'credentials_included': False}, indent=2))
+        elif args.compact_history:
+            if not args.data.is_file():
+                parser.exit(1, f'No database found at {args.data}.\n')
+            with reliability.DatabaseLease(args.data, check_legacy=True):
+                size = args.data.stat().st_size
+                backup = reliability.backup_database(args.data, folder, manual=True)
+                print(f"Backed up to {folder / backup['file']}")
+                store = Store(args.data)
+                try:
+                    removed, remaining = store.compact_history()
+                finally:
+                    store.db.close()
+                print(f'Removed {removed:,} repeated readings; {remaining:,} remain.')
+                print(f'Database: {size / 1048576:.1f} MB -> {args.data.stat().st_size / 1048576:.1f} MB')
+        else:
+            return False
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        parser.exit(1, f'Database maintenance failed: {exc}\n')
+    return True
+
+
 def main(argv=None, *, default_data=ROOT / '.data' / 'hearth.sqlite3', open_browser=False):
     parser = argparse.ArgumentParser(description='Local Signal device monitoring dashboard')
     parser.add_argument('--host', default='127.0.0.1', choices=['127.0.0.1', '0.0.0.0'], help='Use 0.0.0.0 to allow access from the trusted local network.')
@@ -1659,14 +1749,27 @@ def main(argv=None, *, default_data=ROOT / '.data' / 'hearth.sqlite3', open_brow
     parser.add_argument('--data', type=Path, default=default_data)
     parser.add_argument('--no-collector', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--background', action='store_true', help='Enable managed logging and the collection watchdog.')
-    parser.add_argument('--compact-history', action='store_true',
-                        help='Back up the database, remove stored repeats of unchanged readings, reclaim space, then exit.')
+    maintenance = parser.add_mutually_exclusive_group()
+    maintenance.add_argument('--compact-history', action='store_true',
+                             help='With the collector stopped, back up and compact history, then exit.')
+    maintenance.add_argument('--backup', action='store_true', help='Create a manual database backup, then exit. Collection may keep running.')
+    maintenance.add_argument('--list-backups', action='store_true', help='List database backups, then exit.')
+    maintenance.add_argument('--inspect-backup', type=Path, metavar='FILE', help='Validate a backup and show its contents summary, then exit.')
+    maintenance.add_argument('--restore-backup', type=Path, metavar='FILE', help='Preview restoring a backup. Add --apply to restore with the collector stopped.')
+    parser.add_argument('--apply', action='store_true', help='Apply --restore-backup after validation and preserving a rollback copy.')
     router_setup = parser.add_mutually_exclusive_group()
     router_setup.add_argument('--router', nargs=2, metavar=('ADAPTER', 'ACTION'),
                               help=f"Connect or disconnect a router adapter, then exit. Available: {', '.join(routers.ADAPTERS)}.")
     router_setup.add_argument('--google-wifi', choices=('connect', 'disconnect'),
                               help='Shortcut for --router google-wifi ACTION.')
     args = parser.parse_args(argv)
+    if args.apply and not args.restore_backup:
+        parser.error('--apply requires --restore-backup.')
+    if (args.router or args.google_wifi) and any((args.compact_history, args.backup, args.list_backups,
+                                                args.inspect_backup, args.restore_backup)):
+        parser.error('Run router setup and database maintenance as separate commands.')
+    if database_maintenance(args, parser):
+        return
     if args.router or args.google_wifi:
         adapter_id, action = args.router or ('google-wifi', args.google_wifi)
         adapter = routers.ADAPTERS.get(adapter_id)
@@ -1680,16 +1783,6 @@ def main(argv=None, *, default_data=ROOT / '.data' / 'hearth.sqlite3', open_brow
             parser.exit(1, f'{exc}\n')
         except (OSError, EOFError):
             parser.exit(1, 'Router setup could not finish.\n')
-        return
-    if args.compact_history:
-        if not args.data.is_file():
-            parser.exit(1, f'No database found at {args.data}.\n')
-        size = args.data.stat().st_size
-        backup = reliability.backup_database(args.data, args.data.parent / 'backups')
-        print(f"Backed up to {args.data.parent / 'backups' / backup['file']}")
-        removed, remaining = Store(args.data).compact_history()
-        print(f'Removed {removed:,} repeated readings; {remaining:,} remain.')
-        print(f'Database: {size / 1048576:.1f} MB -> {args.data.stat().st_size / 1048576:.1f} MB')
         return
     open_browser = open_browser and not args.background and not args.no_collector
     url = f'http://127.0.0.1:{args.port}'
@@ -1709,36 +1802,45 @@ def main(argv=None, *, default_data=ROOT / '.data' / 'hearth.sqlite3', open_brow
             except (OSError, ValueError, KeyError, TypeError):
                 pass
         raise
-    with httpd:
+    with httpd, ExitStack() as resources:
+        try:
+            resources.enter_context(reliability.DatabaseLease(args.data, check_legacy=True))
+        except (OSError, ValueError) as exc:
+            parser.exit(1, f'Collector could not open its database: {exc}\n')
         if args.background:
             os.umask(0o077)
             reliability.configure_logging(args.data.parent / 'logs')
         httpd.store = Store(args.data)
+        resources.callback(httpd.store.db.close)
+        # Keep the database lease until active requests and collection workers stop.
+        httpd.daemon_threads = False
         collector = httpd.collector = Collector(httpd.store)
         collector.state['background'] = args.background
         code_source = os.environ.get('LOCAL_SIGNAL_CODE_SOURCE')
         if code_source or args.background:
             collector.state['code_source'] = code_source or 'installed'
-        if not args.no_collector:
-            threading.Thread(target=collector.listen_sensors, daemon=True).start()
-            threading.Thread(target=collector.run, daemon=True).start()
-            threading.Thread(target=collector.notifier.run, args=(collector.stop,), daemon=True).start()
-            for monitor in collector.router_monitors:
-                threading.Thread(target=monitor.run, args=(collector.stop,), daemon=True).start()
-            if args.background:
-                threading.Thread(target=collector.watchdog, daemon=True).start()
-        port = httpd.server_port
-        print(f'Local Signal is ready at http://localhost:{port}', flush=True)
-        if args.host == '0.0.0.0' and collector.network.get('local_ip'):
-            print(f'Local network access: http://{collector.network["local_ip"]}:{port}', flush=True)
-        if open_browser:
-            threading.Thread(target=webbrowser.open, args=(f'http://127.0.0.1:{port}',), daemon=True).start()
         try:
+            if not args.no_collector:
+                collector.start_task(collector.listen_sensors)
+                collector.start_task(collector.run)
+                collector.start_task(collector.notifier.run, collector.stop)
+                for monitor in collector.router_monitors:
+                    collector.start_task(monitor.run, collector.stop)
+                if args.background:
+                    collector.start_task(collector.watchdog)
+            port = httpd.server_port
+            print(f'Local Signal is ready at http://localhost:{port}', flush=True)
+            if args.host == '0.0.0.0' and collector.network.get('local_ip'):
+                print(f'Local network access: http://{collector.network["local_ip"]}:{port}', flush=True)
+            if open_browser:
+                threading.Thread(target=webbrowser.open, args=(f'http://127.0.0.1:{port}',), daemon=True).start()
             httpd.serve_forever()
         except KeyboardInterrupt:
             pass
         finally:
             collector.stop.set()
+            httpd.server_close()
+            collector.join_tasks()
 
 
 if __name__ == '__main__':

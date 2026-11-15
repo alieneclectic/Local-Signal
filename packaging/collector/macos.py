@@ -3,9 +3,50 @@
 import argparse
 from pathlib import Path
 import plistlib
+import shlex
 import socket
+import subprocess
+import sys
 
 import background
+
+
+def app_identity():
+    contents = Path(__file__).resolve().parents[3]
+    info = plistlib.loads((contents / 'Info.plist').read_bytes())
+    return info['CFBundleIdentifier'], contents / 'MacOS' / info['CFBundleExecutable']
+
+
+def migration_preview_command():
+    try:
+        _, launcher = app_identity()
+    except (OSError, ValueError, KeyError):
+        launcher = Path(sys.argv[0])  # Still provide stderr guidance if bundle metadata is damaged.
+    return shlex.join([str(launcher), '--migrate-legacy'])
+
+
+def show_migration_dialog(command):
+    script = '''on run argv
+        display dialog (item 1 of argv) with title "Local Signal migration needed" default answer (item 2 of argv) buttons {"OK"} default button "OK" giving up after 30
+    end run'''
+    message = ('Your existing Mac collector has saved history. To preview moving it into this app, '
+               'copy the command below and run it in Terminal. The preview makes no changes. '
+               'After reviewing it, add --apply to migrate. No empty database was created.')
+    try:
+        subprocess.run(['/usr/bin/osascript', '-e', script, message, command],
+                       capture_output=True, text=True, check=True, timeout=35)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False  # The caller always retains the same guidance on stderr.
+
+
+def login_config(data, host='127.0.0.1', port=8799, *, home=None):
+    label, launcher = app_identity()
+    plist = (Path.home() if home is None else Path(home)) / 'Library' / 'LaunchAgents' / f'{label}.plist'
+    config = plistlib.dumps(background.agent_config(
+        None, data.parent, data, launcher=launcher, label=label,
+        launcher_args=['--background', '--host', host, '--port', str(port)], host=host))
+    return label, launcher, plist, config
 
 
 def manage_login(action, argv, data):
@@ -15,11 +56,8 @@ def manage_login(action, argv, data):
         parser.add_argument('--port', type=int, default=8799, metavar='PORT')
     args = parser.parse_args(argv)
 
-    contents = Path(__file__).resolve().parents[3]
-    info = plistlib.loads((contents / 'Info.plist').read_bytes())
-    label = info['CFBundleIdentifier']
-    launcher = contents / 'MacOS' / info['CFBundleExecutable']
-    plist = Path.home() / 'Library' / 'LaunchAgents' / f'{label}.plist'
+    label, launcher, plist, config = login_config(data, getattr(args, 'host', '127.0.0.1'),
+                                                  getattr(args, 'port', 8799))
     target = f'{background.DOMAIN}/{label}'
 
     if action == '--disable-background':
@@ -31,11 +69,6 @@ def manage_login(action, argv, data):
 
     if not 1 <= args.port <= 65535:
         parser.error('Choose a port between 1 and 65535.')
-    config = plistlib.dumps(background.agent_config(
-        None, data.parent, data, launcher=launcher, label=label,
-        launcher_args=['--background', '--host', args.host, '--port', str(args.port)],
-        host=args.host,
-    ))
     if plist.exists() and plist.read_bytes() != config:
         parser.error('Run --disable-background before changing the login configuration.')
     if background.launchctl('print', target, check=False).returncode == 0:

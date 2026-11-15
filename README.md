@@ -30,6 +30,8 @@ python3 -m venv .venv
 
 On macOS, [install-background.command](install-background.command) can set up collection at login. It requires Xcode's Swift compiler and an Apple code signing identity. The running collector keeps up to seven daily database snapshots locally. Check **Settings** for the code source and collection and backup status.
 
+Use `python3 server.py --backup --data PATH` for a manual snapshot and `--list-backups --data PATH` to find available copies. Restoring has a preview step and requires `--apply` to replace a database; stop the collector first. See [backup, restore, and recovery](docs/recovery.md) for the complete workflow, rollback, and credential handling.
+
 The background dashboard defaults to this computer only. To share it on a trusted local network, install with `./install-background.command --host 0.0.0.0`; use `--host 127.0.0.1` to switch back. Later reinstalls retain this explicit choice. Updating an older installation that had no sharing setting defaults to this computer unless you opt in. Existing installed collectors keep their current setting until reinstalled. Network access does not require a login: anyone who can reach the shared dashboard can view readings and edit its local data.
 
 Run `./install-background.command --follow-checkout` if you want the background collector at port 8799 to follow edits in this checkout. It reloads the page after frontend edits and restarts collection after backend edits. The collector uses the installed snapshot when the checkout is unavailable or fails to load. Both sources use the same installed history. Rerun the installer when dependencies or the launcher change. Use `--installed-snapshot` to switch back to manual updates.
@@ -37,6 +39,8 @@ Run `./install-background.command --follow-checkout` if you want the background 
 Volume, mute, relay, Wi-Fi signal, and battery readings are stored when they change, and at least every 10 minutes while they stay the same. Other readings are stored on every collection. To remove repeated readings that an earlier version stored, run `server.py --compact-history --data PATH` with the database path. The command backs up the database first, keeps every change, and then reclaims the freed space.
 
 For Windows collector setup and the Briefcase installer previews, see the [packaging guide](packaging/README.md).
+
+The packaged Mac app uses a different data directory from `install-background.command`. Existing managed installations should use the [explicit Mac migration workflow](packaging/README.md#upgrade-from-the-managed-mac-collector) to carry labels, settings, history, and private connection configuration into the packaged app.
 
 ## Device support
 

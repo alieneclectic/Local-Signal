@@ -69,6 +69,14 @@ History charts use `Store.chart_history`: preserve the read-only WAL snapshot, t
 
 For repeatable synthetic capacity checks, see [capacity measurements](docs/capacity.md). These use disposable databases and mocked collection without accessing a LAN.
 
+## Recovery and installation changes
+
+The [recovery guide](docs/recovery.md) documents manual backups, inspection, restore preview/apply, and rollback. The [packaging guide](packaging/README.md#upgrade-from-the-managed-mac-collector) documents the explicit managed-to-packaged Mac migration. Keep these guides aligned with the command-line interfaces.
+
+Exercise recovery changes with synthetic databases in temporary directories. Cover WAL snapshots, invalid backup rejection, an active collector refusing replacement, rollback preservation, credential handling, and suppression of stale notification delivery after restore. A database lease protects current collectors; retain the checks for older processes that do not acquire that lease. Inspecting or previewing a backup must not migrate or modify the user's source or destination database.
+
+For Mac migration tests, mock `launchctl` and use temporary source/target trees. Check that a nonempty target is refused, the source remains available, private companion files retain their permissions, and a failed handoff restores the original service configuration. Report those mocked checks separately from installation, Local Network permission, startup, and upgrade validation on an actual test Mac. Do not use an installed collector's data or Launch Agent for routine tests.
+
 ## Verify and submit
 
 Run these checks from the repo root before opening a pull request.
