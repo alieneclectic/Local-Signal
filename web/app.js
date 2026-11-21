@@ -53,9 +53,14 @@ const firmwareCatalogLabels = {shelly:'Shelly catalog', wiim:'WiiM release notes
 const iotMonitoring = {
  tasmota:{name:'Tasmota',help:'Reads outputs and supported sensors from the Tasmota web API.'},
  esphome:{name:'ESPHome',help:'Requires the ESPHome web server. Enter up to eight sensors by their exact names and use the units configured on the device.'},
- wled:{name:'WLED',help:'Reads light state, brightness, and controller information from the WLED JSON API.'},
+ wled:{name:'WLED',primary:'wled_brightness_pct',help:'Reads light state, brightness, and controller information from the WLED JSON API.'},
  'fronius-solar':{name:'Fronius Solar API',help:'Requires the local Solar API v1 with site power flow enabled.'},
  opendtu:{name:'OpenDTU',help:'Requires read-only API access. Totals appear when all polling-enabled inverters are reporting.'},
+ airgradient:{name:'AirGradient',help:'Reads air quality from a ONE or Open Air monitor with the local API available.'},
+ ecowitt:{name:'Ecowitt weather gateway',primary:'ecowitt_outdoor_c',help:'Reads weather from a compatible gateway such as a GW1100 or GW2000.'},
+ 'homewizard-p1':{name:'HomeWizard P1 Meter',help:'Enable Local API v1 in the HomeWizard app to read grid power and energy.'},
+ moonraker:{name:'Klipper / Moonraker',port:7125,primary:'moonraker_print_state',help:'Use the Klipper printer’s Moonraker address. The collector needs permission to read printer status.'},
+ openevse:{name:'OpenEVSE',help:'Reads charge state, current and energy from the Wi-Fi gateway’s local status API.'},
 };
 const espMaxPoints = 8;
 const firmwareGuides = {
@@ -259,7 +264,7 @@ function deviceReadout(d) {
  else if(['ipp','nut-ups'].includes(d.protocol)){const readings=Object.values(current),first=current.ipp_state||current.ups_state||readings[0];main=first?`<span class="card-reading media-reading">${metricFormat(first)}</span><span class="reading-label">${esc(first.label)}</span>`:`<span class="card-reading unavailable">—<small>No readings yet</small></span><span class="reading-label">${d.protocol==='ipp'?'Printer':'UPS'} monitoring</span>`;second=`${icon('activity')}<span>${current.ups_battery_pct?`${metricFormat(current.ups_battery_pct)} battery`:current.ipp_queued_jobs?`${fmt(current.ipp_queued_jobs.value,0)} queued jobs`:`${readings.length} readings reported`}</span>`;}
  else if(['bacnet-ip','modbus-tcp'].includes(d.protocol)){const readings=Object.values(current),first=readings[0];main=first?`<span class="card-reading media-reading">${metricFormat(first)}</span><span class="reading-label">${esc(first.label)}</span>`:`<span class="card-reading unavailable">—<small>No valid points yet</small></span><span class="reading-label">${d.protocol==='bacnet-ip'?'BACnet/IP':'Modbus TCP'} monitoring</span>`;second=`${icon('activity')}<span>${readings.length} of ${d.monitor_config?.points?.length||0} points reporting</span>`;}
  else if(iotMonitoring[d.protocol]?.name){
-  const readings=Object.values(current),first=current.wled_brightness_pct||readings[0];
+  const readings=Object.values(current),first=current[iotMonitoring[d.protocol].primary]||readings[0];
   main=first?`<span class="card-reading media-reading">${metricFormat(first)}</span><span class="reading-label">${esc(first.label)}</span>`:`<span class="card-reading unavailable">—<small>No readings yet</small></span><span class="reading-label">${esc(deviceModel(d))}</span>`;
   const count=d.protocol==='esphome'?`${readings.length} of ${d.monitor_config?.points?.length||0} sensors reporting`:`${readings.length} readings reported`;
   second=`${icon('activity')}<span>${count}</span>`;
@@ -569,13 +574,13 @@ function espPointFields(point={}) {
  </div>`;
 }
 function iotFields(config) {
- return Object.entries(iotMonitoring).map(([protocol,{name,help}])=>{
+ return Object.entries(iotMonitoring).map(([protocol,{name,help,port=80}])=>{
   const active=config.protocol===protocol,settings=active?config:{};
   const sensors=protocol==='esphome'?`<div class="esp-points">${(settings.points||[{}]).map(espPointFields).join('')}</div>
    <button class="text-button" type="button" data-add-esp-point ${(settings.points?.length||0)>=espMaxPoints?'disabled':''}>+ Add sensor</button>`:'';
   return `<fieldset class="office-fields" data-protocol-fields="${protocol}" ${active?'':'hidden disabled'}>
    <legend>${name}</legend><p class="muted">${help}</p>
-   <label>HTTP port<input data-iot-port type="number" min="1" max="65535" step="1" value="${esc(settings.port??80)}" required></label>
+   <label>HTTP port<input data-iot-port type="number" min="1" max="65535" step="1" value="${esc(settings.port??port)}" required></label>
    ${sensors}
   </fieldset>`;
  }).join('');

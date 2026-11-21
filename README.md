@@ -59,6 +59,11 @@ The packaged Mac app uses a different data directory from `install-background.co
 | WLED (experimental) | Light state, brightness, LED count, uptime, and installed WLED version. |
 | Fronius Solar API v1 (experimental) | Site PV, grid, load and battery power, plus daily and lifetime energy when reported. |
 | OpenDTU (experimental) | Total AC power, today's solar yield, and lifetime solar yield from polling-enabled inverters. |
+| AirGradient ONE and Open Air (experimental) | Particulate matter, CO₂, air temperature, humidity, and VOC and NOₓ indices where available. |
+| Ecowitt weather gateways (experimental) | Indoor and outdoor temperature and humidity, pressure, wind, and rain from supported sensors. |
+| HomeWizard P1 Meter (experimental) | Net grid power, import and export energy counters, and reported per-phase power, voltage and current. |
+| Klipper 3D printers through Moonraker (experimental) | Controller state, print state and progress, and hotend and bed temperatures and targets. |
+| OpenEVSE Wi-Fi gateways (experimental) | Charge state, current, power, voltage, session and lifetime energy, and charger internal temperature. |
 
 Discovery can find devices that don't expose telemetry. Available fields depend on the device model and what its local API exposes. Devices that sleep or sit on another subnet may be missed by a scan. Last reported readings are shown separately from fresh ones, and internal board temperature is separate from room temperature.
 
@@ -74,7 +79,7 @@ These commercial readers need no extra Python dependencies. Manufacturer compati
 
 ### Local HTTP devices
 
-In **Add device** or an existing device's details, enter its private IPv4 address and choose the integration under **Monitoring**. The default HTTP port is 80. These integrations use read-only requests to a local API that is already available without login. They need no extra Python packages or cloud account. Add them explicitly to collect readings after a scan. Compatibility has been tested with protocol fixtures.
+In **Add device** or an existing device's details, enter its private IPv4 address and choose the integration under **Monitoring**. Most use HTTP port 80. Moonraker defaults to port 7125. These integrations use read-only requests to a local API that is already available without login from the collector. They need no extra Python packages or cloud account. Add them explicitly to collect readings after a scan. Compatibility has been tested with protocol fixtures.
 
 | Integration | Setup and readings |
 | --- | --- |
@@ -83,6 +88,11 @@ In **Add device** or an existing device's details, enter its private IPv4 addres
 | WLED | The local `/json` endpoint supplies state and device information. Brightness is displayed as 0% when the light is off. [WLED JSON API](https://kno.wled.ge/interfaces/json-api/) |
 | Fronius Solar API | Enable Solar API v1 on a compatible inverter or Datamanager with `GetPowerFlowRealtimeData.fcgi`. Grid power is positive for imports and battery power for discharge. Site load is displayed as positive for consumption. Meter-dependent and battery-dependent fields appear only when reported. PV power is reported on the AC or DC side according to the inverter model. [Fronius Solar API v1 manual](https://www.fronius.tel/~/downloads/Solar%20Energy/Operating%20Instructions/42%2C0410%2C2012.pdf) |
 | OpenDTU | Use the local `/api/livedata/status` endpoint with read-only access. Totals are recorded when at least one inverter is polling-enabled and every polling-enabled inverter is reachable with data at most two minutes old. [OpenDTU Web API](https://github.com/tbnobody/OpenDTU-docs/blob/master/docs/firmware/web_api.md) |
+| AirGradient | Use the monitor's `/measures/current` endpoint. The reader uses atmospheric PM and the uncompensated air temperature and humidity fields. Gas readings depend on which sensors are fitted. [AirGradient local API](https://www.airgradient.com/documentation/kb/where-do-i-access-the-api-documentation-api-token-and-local-api) · [Field definitions](https://www.airgradient.com/documentation/kb/kb-airgradient-one-mqtt-configuration-guide) |
+| Ecowitt | Use a gateway with the LAN HTTP API, such as the GW1100 or GW2000. The reader normalizes reported temperature, pressure, wind speed and rain units and keeps conventional and piezo rain sensors separate. [Ecowitt LAN HTTP protocol](https://oss.ecowitt.net/uploads/20260114/HTTP%20API%20interface%20Protocol%20%28Generic%29-%28V1.0.6-2026-1-14%29%20.pdf) |
+| HomeWizard P1 | Use an HWE-P1 with Local API v1 enabled. Local Signal verifies the meter model using `/api` before reading `/api/v1/data`. Grid power is positive for imports and negative for exports. This reader requires v1 HTTP access. [HomeWizard device information](https://api-documentation.homewizard.com/docs/v1/api/) · [Measurement fields](https://api-documentation.homewizard.com/docs/v1/measurement/) |
+| Klipper / Moonraker | Use the Moonraker HTTP port and an existing configuration that allows the collector to query printer status. Progress appears during an active or paused job. Heater readings are shown when Klipper reports that the controller is ready. [Moonraker polling](https://moonraker.readthedocs.io/en/latest/external_api/introduction/#basic-print-status) · [Klipper status fields](https://www.klipper3d.org/Status_Reference.html) |
+| OpenEVSE | Use an ESP32 gateway that already permits a local `GET /status` from the collector. Readings require a live link between the gateway and charger controller. The displayed voltage is the gateway's reported voltage, which can come from an external source. [OpenEVSE WiFi API](https://github.com/OpenEVSE/openevse_esp32_firmware/blob/master/api.yml) · [Status fields](https://github.com/OpenEVSE/openevse_esp32_firmware/blob/master/models/Status.yaml) |
 
 Settings shows the last collection duration. A warning appears when collection takes at least 30 seconds. CSV exports stream in batches. Charts fetch one selected metric, can be narrowed to a device, and share a 12,000-point budget across the view; full-resolution samples remain in CSV exports. See [capacity measurements and remaining limits](docs/capacity.md).
 

@@ -39,7 +39,7 @@ OPENDTU_STATUS = {
 }
 ESP_TEMPERATURE = {'domain': 'sensor', 'name': 'Température', 'subdevice': 'Cold Room', 'unit': '°C'}
 ESP_BINARY = {'domain': 'binary_sensor', 'name': 'door'}
-CASES = (
+ORIGINAL_CASES = (
     ('tasmota', '10.23.0.41', {'/cm?cmnd=Status%2010': TASMOTA_SENSORS, '/cm?cmnd=Status%2011': TASMOTA_STATE},
      {}, 'tasmota_power_w'),
     ('esphome', '10.23.0.42', {
@@ -50,6 +50,44 @@ CASES = (
     ('fronius-solar', '10.23.0.44', {'/solar_api/v1/GetPowerFlowRealtimeData.fcgi': FRONIUS_FLOW}, {}, 'fronius_pv_w'),
     ('opendtu', '10.23.0.45', {'/api/livedata/status': OPENDTU_STATUS}, {}, 'opendtu_ac_w'),
 )
+AIRGRADIENT = {'model': 'I-9PSL', 'serialno': 'fixture-private', 'atmp': 22.4, 'rhum': 41.2,
+               'pm01': 0, 'pm02': 0, 'pm02Compensated': 99, 'pm10': 2.3, 'rco2': 465,
+               'tvocIndex': 105, 'noxIndex': 1}
+ECOWITT = {
+    'common_list': [
+        {'id': '0x02', 'val': '14.0', 'unit': 'F'}, {'id': '0x07', 'val': '83%'},
+        {'id': '3', 'val': '17.0', 'unit': 'F'}, {'id': '0x0A', 'val': '0'},
+        {'id': '0x0B', 'val': '0.00 mph'}, {'id': '0x0C', 'val': '10.00 mph'},
+    ],
+    'wh25': [{'intemp': '21.5', 'unit': 'C', 'inhumi': '0%', 'abs': '29.32 inHg'}],
+    'rain': [{'id': '0x10', 'val': '0.40 in'}, {'id': '0x0E', 'val': '0.00 in/Hr'}],
+    'piezoRain': [{'id': '0x10', 'val': '2 mm'}],
+}
+HOMEWIZARD_IDENTITY = {'product_type': 'HWE-P1', 'api_version': 'v1', 'serial': '021122334466'}
+HOMEWIZARD_METER = {
+    'unique_id': 'fixture-private', 'wifi_ssid': 'fixture-private', 'active_power_w': -592,
+    'total_power_import_kwh': 3291.82, 'total_power_export_kwh': 0, 'active_power_l1_w': -600,
+    'active_power_l2_w': 8, 'active_voltage_l1_v': 229.5, 'active_current_l2_a': 0.1,
+}
+MOONRAKER_ROUTE = ('/printer/objects/query?webhooks=state&print_stats=state&virtual_sdcard=progress'
+                   '&extruder=temperature,target&heater_bed=temperature,target')
+MOONRAKER_STATUS = {'result': {'eventtime': 1792.4, 'status': {
+    'webhooks': {'state': 'ready'}, 'print_stats': {'state': 'printing', 'filename': 'fixture-private.gcode'},
+    'virtual_sdcard': {'progress': 0}, 'extruder': {'temperature': 211.8, 'target': 215},
+    'heater_bed': {'temperature': 61, 'target': 60},
+}}}
+OPENEVSE = {'evse_connected': 1, 'rapi_connected': 1, 'state': 2, 'amp': 0, 'voltage': 241.22,
+            'power': 0, 'pilot': 24, 'temp': 271, 'session_energy': 332.5, 'total_energy': 29,
+            'tesla_vehicle_id': 'fixture-private'}
+NEW_CASES = (
+    ('airgradient', '10.23.0.46', {'/measures/current': AIRGRADIENT}, {}, 'airgradient_pm25'),
+    ('ecowitt', '10.23.0.47', {'/get_livedata_info?': ECOWITT}, {}, 'ecowitt_wind_speed_ms'),
+    ('homewizard-p1', '10.23.0.48', {'/api': HOMEWIZARD_IDENTITY, '/api/v1/data': HOMEWIZARD_METER},
+     {}, 'homewizard_export_kwh'),
+    ('moonraker', '10.23.0.49', {MOONRAKER_ROUTE: MOONRAKER_STATUS}, {}, 'moonraker_progress_pct'),
+    ('openevse', '10.23.0.50', {'/status': OPENEVSE}, {}, 'openevse_current_a'),
+)
+CASES = ORIGINAL_CASES + NEW_CASES
 
 
 @contextmanager
@@ -66,6 +104,7 @@ def serve(httpd):
 
 class FixtureDevices(ThreadingHTTPServer):
     daemon_threads = True
+    request_queue_size = 16
 
     def __init__(self):
         self.requests = []
@@ -127,7 +166,7 @@ class IoTTests(unittest.TestCase):
         for protocol, ip, _, config, _ in CASES:
             value = {'protocol': protocol, **config}
             normalized = server.validate_monitor_config(value)
-            self.assertEqual(normalized['port'], 80)
+            self.assertEqual(normalized['port'], 7125 if protocol == 'moonraker' else 80)
             self.assertEqual(server.validate_monitor_config(normalized), normalized)
             for extra in ({'port': True}, {'port': 0}, {'port': '80'}, {'path': '/settings'}, {'password': 'fixture'}):
                 with self.subTest(protocol=protocol, extra=extra), self.assertRaises(ValueError):
@@ -147,7 +186,7 @@ class IoTTests(unittest.TestCase):
     def test_device_metrics_preserve_zero_signs_identity_types_and_units(self):
         peer = FixtureDevices()
         with serve(peer), peer.redirect():
-            tasmota, esp, wled, fronius, opendtu = [probe(i) for i in range(len(CASES))]
+            tasmota, esp, wled, fronius, opendtu = [probe(i) for i in range(len(ORIGINAL_CASES))]
         for result in (tasmota, esp, wled, fronius, opendtu):
             self.assertEqual((result['status'], result['last_telemetry']), ('online', STAMP))
             self.assertNotIn('fixture-private', json.dumps(result))
@@ -170,7 +209,74 @@ class IoTTests(unittest.TestCase):
         self.assertAlmostEqual(opendtu['metrics']['opendtu_daily_kwh']['value'], .49)
         self.assertAlmostEqual(opendtu['metrics']['opendtu_total_kwh']['value'], 12.2)
         self.assertEqual(peer.requests, [('GET', f'{ip}:8080', path, None)
-                                         for _, ip, paths, _, _ in CASES for path in paths])
+                                         for _, ip, paths, _, _ in ORIGINAL_CASES for path in paths])
+
+    def test_new_device_requests_and_normalized_metrics(self):
+        peer = FixtureDevices()
+        with serve(peer), peer.redirect():
+            results = [probe(i) for i in range(len(ORIGINAL_CASES), len(CASES))]
+        for result in results:
+            self.assertEqual((result['status'], result['last_telemetry']), ('online', STAMP))
+            self.assertNotIn('fixture-private', json.dumps(result))
+        air, weather, meter, printer, charger = [result['metrics'] for result in results]
+        self.assertEqual((air['airgradient_pm25']['value'], air['airgradient_pm25']['unit']), (0, 'µg/m³'))
+        self.assertEqual(air['airgradient_co2_ppm']['value'], 465)
+        self.assertAlmostEqual(weather['ecowitt_outdoor_c']['value'], -10)
+        self.assertAlmostEqual(weather['ecowitt_wind_gust_ms']['value'], 4.4704)
+        self.assertAlmostEqual(weather['ecowitt_pressure_hpa']['value'], 992.889, places=3)
+        self.assertAlmostEqual(weather['ecowitt_rain_today_mm']['value'], 10.16)
+        self.assertEqual(weather['ecowitt_piezo_rain_today_mm']['value'], 2)
+        self.assertEqual((meter['homewizard_grid_w']['value'], meter['homewizard_l1_w']['value']), (-592, -600))
+        self.assertEqual(results[2]['mac'], '021122334466')
+        self.assertNotIn('homewizard_l3_w', meter)
+        self.assertEqual((printer['moonraker_print_state']['value'], printer['moonraker_hotend_target_c']['value']),
+                         ('Printing', 215))
+        self.assertEqual(printer['moonraker_progress_pct']['value'], 0)
+        self.assertEqual(charger['openevse_state']['value'], 'Vehicle connected')
+        self.assertAlmostEqual(charger['openevse_internal_temperature_c']['value'], 27.1)
+        self.assertAlmostEqual(charger['openevse_session_kwh']['value'], 0.3325)
+        self.assertEqual(peer.requests, [('GET', f'{ip}:8080', path, None)
+                                         for _, ip, paths, _, _ in NEW_CASES for path in paths])
+
+    def test_partial_and_unavailable_readings_on_new_devices(self):
+        peer = FixtureDevices()
+        with serve(peer), peer.redirect():
+            peer.routes[('10.23.0.46', '/measures/current')] = {
+                'pm02': 0, 'pm10': -1, 'rco2': 0, 'atmp': -999, 'rhum': 101, 'tvocIndex': False,
+            }
+            self.assertEqual(set(probe(5)['metrics']), {'airgradient_pm25'})
+            peer.routes[('10.23.0.47', '/get_livedata_info?')] = {'common_list': [
+                {'id': '0x02', 'val': '32 F', 'unit': 'C'}, {'id': '0x07', 'val': '--'},
+                {'id': '0x0B', 'val': '1 km/h'}, {'id': '0x0C', 'val': '5'},
+            ]}
+            weather = probe(6)['metrics']
+            self.assertEqual(set(weather), {'ecowitt_wind_speed_ms'})
+            self.assertAlmostEqual(weather['ecowitt_wind_speed_ms']['value'], 1/3.6)
+            for identity in ({'api_version': 'v2', 'product_type': 'HWE-P1'},
+                             {'api_version': 'v1', 'product_type': 'HWE-SKT'}, (404, b''), (401, b'')):
+                peer.routes[('10.23.0.48', '/api')] = identity
+                before = len(peer.requests)
+                self.assertEqual(probe(7)['metrics'], {})
+                self.assertEqual([request[2] for request in peer.requests[before:]], ['/api'])
+            peer.routes[('10.23.0.48', '/api')] = HOMEWIZARD_IDENTITY
+            peer.routes[('10.23.0.48', '/api/v1/data')] = (422, b'{}')
+            self.assertNotIn('last_telemetry', probe(7))
+            status = MOONRAKER_STATUS['result']['status']
+            peer.routes[('10.23.0.49', MOONRAKER_ROUTE)] = {'result': {'status': {
+                **status, 'webhooks': {'state': 'shutdown'},
+            }}}
+            self.assertEqual(set(probe(8)['metrics']), {'moonraker_controller_state'})
+            peer.routes[('10.23.0.49', MOONRAKER_ROUTE)] = {'result': {'status': {
+                **status, 'print_stats': {'state': 'standby'},
+            }}}
+            self.assertNotIn('moonraker_progress_pct', probe(8)['metrics'])
+            peer.routes[('10.23.0.50', '/status')] = {**OPENEVSE, 'evse_connected': 0}
+            self.assertNotIn('last_telemetry', probe(9))
+            peer.routes[('10.23.0.50', '/status')] = {**OPENEVSE, 'state': 3, 'amp': 5940, 'temp': -2560}
+            charger = probe(9)['metrics']
+            self.assertAlmostEqual(charger['openevse_current_a']['value'], 5.94)
+            self.assertEqual(charger['openevse_state']['value'], 'Charging')
+            self.assertNotIn('openevse_internal_temperature_c', charger)
 
     def test_redirect_auth_oversized_and_invalid_payloads(self):
         peer = FixtureDevices()
@@ -235,7 +341,7 @@ class IoTTests(unittest.TestCase):
             }
             self.assertEqual(probe(3)['metrics'], {})
 
-    def test_collector_and_dashboard_api_store_all_five_and_keep_last_known_data(self):
+    def test_collector_and_dashboard_api_store_all_integrations_and_keep_last_known_data(self):
         peer = FixtureDevices()
         with tempfile.TemporaryDirectory() as folder, serve(peer), peer.redirect(), patch.object(
             server, 'network_info', return_value={}
@@ -267,7 +373,7 @@ class IoTTests(unittest.TestCase):
                 devices = {d['protocol']: d for d in json.loads(request('/api/state')[1])['devices']}
                 for protocol, _, _, _, metric in CASES:
                     device = devices[protocol]
-                    self.assertEqual(device['status'], 'online')
+                    self.assertEqual(device['status'], 'online', (protocol, device.get('point_errors')))
                     metric = metric or next(iter(device['metrics']))
                     device_filter = f"device_id={device['device_id']}"
                     status, history = request(f'/api/history?{device_filter}&metric={metric}')
