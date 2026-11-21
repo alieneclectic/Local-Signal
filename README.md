@@ -54,6 +54,11 @@ The packaged Mac app uses a different data directory from `install-background.co
 | Modbus TCP equipment (experimental) | Configured holding/input registers, coils, and discrete inputs. Numeric types, byte/word order, units, scaling, and raw invalid-value markers come from the device's register map. |
 | IPP network printers (experimental) | Printer state, queue count, accepting-jobs status, and supply percentages when reported. |
 | UPS systems through NUT (experimental) | Battery charge/runtime, UPS status/load, power, voltage, frequency, and device temperatures when exposed by an existing Network UPS Tools server. |
+| Tasmota (experimental) | Output state, single-value electricity readings, attached temperature and humidity sensors, Wi-Fi signal, and uptime where available. |
+| ESPHome (experimental) | Up to eight configured numeric or binary sensors from a device's web server. |
+| WLED (experimental) | Light state, brightness, LED count, uptime, and installed WLED version. |
+| Fronius Solar API v1 (experimental) | Site PV, grid, load and battery power, plus daily and lifetime energy when reported. |
+| OpenDTU (experimental) | Total AC power, today's solar yield, and lifetime solar yield from polling-enabled inverters. |
 
 Discovery can find devices that don't expose telemetry. Available fields depend on the device model and what its local API exposes. Devices that sleep or sit on another subnet may be missed by a scan. Last reported readings are shown separately from fresh ones, and internal board temperature is separate from room temperature.
 
@@ -66,6 +71,18 @@ For network printers, choose **IPP — network printer** and enter the private I
 For a UPS, choose **NUT — UPS server**, enter the private IP of an existing Network UPS Tools server, its TCP port (normally 3493), and the configured UPS name. This reader uses anonymous `LIST VAR` only. TLS and authenticated NUT connections are not supported. One UPS can be configured per server IP; available readings depend on its NUT driver.
 
 These commercial readers need no extra Python dependencies. Manufacturer compatibility has not been verified on physical hardware. See [commercial device research and setup](docs/commercial-devices.md) for the rationale, boundaries, examples, and validation steps.
+
+### Local HTTP devices
+
+In **Add device** or an existing device's details, enter its private IPv4 address and choose the integration under **Monitoring**. The default HTTP port is 80. These integrations use read-only requests to a local API that is already available without login. They need no extra Python packages or cloud account. Add them explicitly to collect readings after a scan. Compatibility has been tested with protocol fixtures.
+
+| Integration | Setup and readings |
+| --- | --- |
+| Tasmota | The web command API must allow status reads. Local Signal queries `Status 10` and `Status 11`. It reads scalar energy fields; multi-channel meter arrays are skipped. [Status commands](https://tasmota.github.io/docs/Commands/) · [Response examples](https://tasmota.github.io/docs/JSON-Status-Responses/) |
+| ESPHome | Use the device's `web_server` component. Choose the sensor type, enter the exact entity name and optional sub-device name, and copy the unit shown on the device for numeric sensors. For older firmware with object-ID URLs, enter the object ID as the entity name. [Web Server API](https://esphome.io/web-api/) |
+| WLED | The local `/json` endpoint supplies state and device information. Brightness is displayed as 0% when the light is off. [WLED JSON API](https://kno.wled.ge/interfaces/json-api/) |
+| Fronius Solar API | Enable Solar API v1 on a compatible inverter or Datamanager with `GetPowerFlowRealtimeData.fcgi`. Grid power is positive for imports and battery power for discharge. Site load is displayed as positive for consumption. Meter-dependent and battery-dependent fields appear only when reported. PV power is reported on the AC or DC side according to the inverter model. [Fronius Solar API v1 manual](https://www.fronius.tel/~/downloads/Solar%20Energy/Operating%20Instructions/42%2C0410%2C2012.pdf) |
+| OpenDTU | Use the local `/api/livedata/status` endpoint with read-only access. Totals are recorded when at least one inverter is polling-enabled and every polling-enabled inverter is reachable with data at most two minutes old. [OpenDTU Web API](https://github.com/tbnobody/OpenDTU-docs/blob/master/docs/firmware/web_api.md) |
 
 Settings shows the last collection duration. A warning appears when collection takes at least 30 seconds. CSV exports stream in batches. Charts fetch one selected metric, can be narrowed to a device, and share a 12,000-point budget across the view; full-resolution samples remain in CSV exports. See [capacity measurements and remaining limits](docs/capacity.md).
 

@@ -277,15 +277,15 @@
 @media (max-width: 530px) { :is(.bacnet-fields, .modbus-fields, .office-fields) { padding: 10px; } .bacnet-point { grid-template-columns: minmax(0, 1fr); } }
 .detail-status { flex-wrap: wrap; }
 
-.modbus-points { display: grid; gap: 18px; margin: 18px 0; }
-.modbus-point { display: grid; min-width: 0; gap: 12px; padding-bottom: 18px; border-bottom: 1px solid var(--line); }
-.modbus-point .form-row { margin: 0; min-width: 0; }
-.modbus-point .form-row > label { min-width: 0; }
-.modbus-point input { min-width: 0; width: 100%; }
-.modbus-point button { justify-self: start; }
+:is(.modbus-points, .esp-points) { display: grid; gap: 18px; margin: 18px 0; }
+:is(.modbus-point, .esp-point) { display: grid; min-width: 0; gap: 12px; padding-bottom: 18px; border-bottom: 1px solid var(--line); }
+:is(.modbus-point, .esp-point) .form-row { margin: 0; min-width: 0; }
+:is(.modbus-point, .esp-point) .form-row > label { min-width: 0; }
+:is(.modbus-point, .esp-point) input { min-width: 0; width: 100%; }
+:is(.modbus-point, .esp-point) button { justify-self: start; }
 .modbus-numeric { display: grid; gap: 12px; min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 7px; margin: 0; }
-.modbus-numeric[hidden], .modbus-bit-note[hidden] { display: none; }
-@media (max-width: 530px) { .modbus-point .form-row { grid-template-columns: minmax(0, 1fr); } .modbus-numeric { padding: 8px; } }
+.modbus-numeric[hidden], .modbus-bit-note[hidden], .monitoring-setup .esp-unit[hidden] { display: none; }
+@media (max-width: 530px) { :is(.modbus-point, .esp-point) .form-row { grid-template-columns: minmax(0, 1fr); } .modbus-numeric { padding: 8px; } }
 
 /* Alerts */
 .alert-notice strong { font-weight: 600; }

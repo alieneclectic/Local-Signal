@@ -35,12 +35,14 @@ import bacnet
 import modbus
 import ipp
 import nut
+import iot
+from device_io import NoRedirects, read_json
 from firmware import checks as firmware_checks
 from firmware.adapters import cast, nest, roku, shelly, sonos, wiim
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse, parse_qs
-from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHandler
+from urllib.request import build_opener, ProxyHandler
 
 ROOT = Path(__file__).resolve().parent
 WEB_ASSETS = ('/index.html', '/app.js', '/theme.js', '/style.css', '/favicon.svg')
@@ -62,8 +64,10 @@ FIRMWARE_ADAPTERS = {**FIRMWARE_CATALOGS, 'roku': roku}
 FIRMWARE_CATALOG_KEYS = {source: f'{source}_stable_catalog' for source in FIRMWARE_CATALOGS}
 FIRMWARE_CATALOG_KEYS['nest'] = 'nest_production_catalog'  # Refresh the old Mini-only cache on upgrade.
 RFC1918 = [ipaddress.ip_network(x) for x in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')]
-MONITOR_READERS = {'bacnet-ip': bacnet, 'modbus-tcp': modbus, 'ipp': ipp, 'nut-ups': nut}
-MONITOR_KINDS = {'ipp': 'printer', 'nut-ups': 'ups'}
+MONITOR_READERS = {'bacnet-ip': bacnet, 'modbus-tcp': modbus, 'ipp': ipp, 'nut-ups': nut,
+                   **dict.fromkeys(iot.INTEGRATIONS, iot)}
+MONITOR_KINDS = {'ipp': 'printer', 'nut-ups': 'ups',
+                 **{protocol: kind for protocol, (_, kind) in iot.INTEGRATIONS.items()}}
 
 
 def validate_monitor_config(value):
@@ -165,25 +169,6 @@ def network_info():
     except (OSError, ValueError, IndexError, subprocess.SubprocessError):
         pass
     return info
-
-
-class NoRedirects(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-def read_json(ip, path, timeout=2):
-    # Do not follow redirects to public or unexpected hosts. Never use proxy env settings.
-    opener = build_opener(ProxyHandler({}), NoRedirects())
-    request = Request(f'http://{local_ip(ip)}{path}', headers={'Accept': 'application/json', 'User-Agent': 'Hearth-Local/1.0'})
-    with opener.open(request, timeout=timeout) as response:
-        raw = response.read(262_145)
-        if len(raw) > 262_144:
-            raise ValueError('Device response exceeds 256 KB.')
-        value = json.loads(raw)
-        if not isinstance(value, dict):
-            raise ValueError('Device did not return a JSON object.')
-        return value
 
 
 def ping(ip):

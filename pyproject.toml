@@ -22,6 +22,7 @@ sources = [
     "device_io.py",
     "ipp.py",
     "nut.py",
+    "iot.py",
     "energy.py",
     "firmware",
     "media_readers.py",
