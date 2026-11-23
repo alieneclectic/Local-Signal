@@ -40,6 +40,6 @@ node --check web/app.js
 
 For a focused run, use `python3 -m unittest discover -s tests -p 'test_firmware.py' -v` and substitute the affected test file. For UI changes, use the [loopback preview](CONTRIBUTING.md#get-started-locally) with a fresh database. `--no-collector` skips startup collection, but manual refresh, scan, and device-add requests can still trigger network activity. Mock vendor lookups when testing with firmware fixtures.
 
-## Cloud CI
+## Release checks
 
-Run suitable checks locally and batch fixes. Ask before starting or rerunning quota-consuming cloud CI, including any push that triggers it, unless that run was already authorized. Keep GitHub Actions disabled for `alieneclectic` repositories unless the maintainer approves enabling it. For new `alieneclectic` repositories, disable Actions before pushing workflow files. Keep paid overage at $0 with the hard stop enabled unless the maintainer approves a change. Preserve required release, signing, security, and performance checks and report any cloud gates deferred for lack of authorization or quota.
+Preserve required release, signing, security, and performance checks.
