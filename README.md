@@ -1,16 +1,18 @@
 # Local Signal
 
-Local Signal is a dashboard for discovering and monitoring devices on a local network. Use it to see what's reachable, check readings from supported devices, and compare up to 30 days of history. The collector runs on a computer on the network and stores its data in SQLite. No cloud account is required.
+When a room feels cold or a device stops responding, it can take several apps just to figure out what happened. Local Signal brings readings from supported devices across brands into one dashboard, so you can see what’s on your network, check how much power a plug is drawing, or look back to see when the room cooled down. It reads devices over your local network and saves the history on the computer running it. You can get started without a cloud account.
 
 ## What you can do
 
 - **Build an inventory.** Scan the local subnet or add a device by its private IPv4 address. Use advertised names or add your own labels, rooms, and notes.
 - **Monitor devices.** See available power, energy, temperature, humidity, and media readings. Pin devices to the overview for quick access.
-- **Explore history.** Compare readings across devices and export collected samples as CSV. The collector records what it observes, so downtime and missed reports leave gaps.
-- **Get alerts.** Hear when a pinned device stops responding, a UPS goes on battery, or a printer or sensor runs low, in the dashboard or through an optional webhook.
+- **Explore history.** Compare up to 30 days of readings across devices and export collected samples as CSV. Downtime and missed reports leave gaps in the record.
+- **Get alerts.** See when a pinned device stops responding, a UPS goes on battery, or a printer or sensor runs low. Set your own threshold, such as a garage staying below 40 °F for 10 minutes, and send notifications through an optional webhook.
 - **Check firmware.** See installed versions and update notices where supported. A newer published version and an update offered by the device are shown separately.
 
 ## Get started
+
+To try the dashboard without hardware, follow the [sample-data quick start](docs/tester-quickstart.md). It uses a simulated controller and a temporary database.
 
 From the repository root, run the collector with Python 3.11 or newer:
 
@@ -34,7 +36,7 @@ Use `python3 server.py --backup --data PATH` for a manual snapshot and `--list-b
 
 The background dashboard defaults to this computer only. To share it on a trusted local network, install with `./install-background.command --host 0.0.0.0`; use `--host 127.0.0.1` to switch back. Later reinstalls retain this explicit choice. Updating an older installation that had no sharing setting defaults to this computer unless you opt in. Existing installed collectors keep their current setting until reinstalled. Network access does not require a login: anyone who can reach the shared dashboard can view readings and edit its local data.
 
-Run `./install-background.command --follow-checkout` if you want the background collector at port 8799 to follow edits in this checkout. It reloads the page after frontend edits and restarts collection after backend edits. The collector uses the installed snapshot when the checkout is unavailable or fails to load. Both sources use the same installed history. Rerun the installer when dependencies or the launcher change. Use `--installed-snapshot` to switch back to manual updates.
+Run `./install-background.command --follow-checkout` if you want the background collector at port 8799 to follow edits in this checkout. It reloads the page after frontend edits and restarts collection after backend edits. The collector uses the installed snapshot when the checkout is unavailable or fails to load. Both modes use the same installed history and honor your saved network-sharing setting. Rerun the installer when dependencies or the launcher change. Use `--installed-snapshot` to switch back to manual updates.
 
 Volume, mute, relay, Wi-Fi signal, and battery readings are stored when they change, and at least every 10 minutes while they stay the same. Other readings are stored on every collection. To remove repeated readings that an earlier version stored, run `server.py --compact-history --data PATH` with the database path. The command backs up the database first, keeps every change, and then reclaims the freed space.
 
@@ -149,6 +151,8 @@ Setup stores a reusable Google credential in a private companion file next to th
 Device access is read-only. Local Signal can report relay, playback, and firmware status; labels and settings are saved in its own database. Firmware checks may fetch public vendor release information without sending device data.
 
 The dashboard listens on the computer running it by default. To make it available on a trusted local network, start it with `--host 0.0.0.0` and use the local network URL printed at startup. The dashboard has no login, so anyone who can reach it can view readings and edit dashboard data. Keep it off the public internet. Use `--port` to choose a different port or `--data` to choose a database file.
+
+On macOS and Linux, starting the collector restricts access to its SQLite database and sidecar files to the file owner. If you set `--data`, use a path to a regular file or a new file the collector can create.
 
 On macOS, opening `start.command` reuses an existing collector, or starts a source collector on this computer only. Running it with server options, such as `./start.command --host 0.0.0.0 --port 8800`, starts a source collector with those options; it does not change an installed background collector. Choose an available port if another collector is running. See the background installer options above to change login startup, or the [packaging guide](packaging/README.md#macos) for the PKG app.
 
