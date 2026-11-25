@@ -378,11 +378,9 @@ class Store:
         name_mode TEXT NOT NULL DEFAULT 'manual')'''
 
     def __init__(self, path):
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self.path = path.resolve()
+        self.path = reliability.prepare_database(path)
         self.lock = threading.RLock()
-        self.db = sqlite3.connect(path, check_same_thread=False)
+        self.db = sqlite3.connect(self.path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.execute('PRAGMA journal_mode=WAL')
         self.db.executescript(self.DEVICE_TABLE + ''';

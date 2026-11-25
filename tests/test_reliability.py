@@ -1,9 +1,11 @@
 from datetime import datetime, timedelta, timezone
 from contextlib import closing
 import gzip
+import os
 from pathlib import Path
 import shutil
 import sqlite3
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -13,6 +15,40 @@ import background
 import dev
 import reliability
 import server
+
+
+@unittest.skipUnless(os.name == 'posix', 'requires POSIX file permissions')
+class DatabasePermissionsTests(unittest.TestCase):
+    def test_new_database_and_sidecars_are_private_with_a_standard_umask(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'collector' / 'test.sqlite3'
+            previous_umask = os.umask(0o022)
+            try:
+                with reliability.DatabaseLease(path), closing(server.Store(path).db):
+                    self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+                    for file in (path, Path(str(path) + '-wal'), Path(str(path) + '-shm')):
+                        self.assertEqual(stat.S_IMODE(file.stat().st_mode), 0o600)
+            finally:
+                os.umask(previous_umask)
+
+    def test_opening_an_existing_database_restricts_files_and_preserves_data(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder) / 'shared'
+            directory.mkdir()
+            directory.chmod(0o755)
+            path = directory / 'test.sqlite3'
+            store = server.Store(path)
+            with closing(store.db):
+                store.save_setting('test-setting', 'previous value')
+                files = (path, Path(str(path) + '-wal'), Path(str(path) + '-shm'))
+                for file in files:
+                    file.chmod(0o644)
+                reopened = server.Store(path)
+                with closing(reopened.db):
+                    self.assertEqual(reopened.setting('test-setting'), 'previous value')
+                    self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o755)
+                    for file in files:
+                        self.assertEqual(stat.S_IMODE(file.stat().st_mode), 0o600)
 
 
 class BackupTests(unittest.TestCase):
@@ -104,6 +140,20 @@ class DashboardSharingTests(unittest.TestCase):
                     patch.object(background, 'install') as install:
                 background.main()
                 install.assert_called_once_with(True, host=host)
+
+    def test_background_checkout_honors_saved_host_from_older_launcher(self):
+        checkout = Path('/example/checkout')
+        argv = ['dev.py', '--background', '--checkout', str(checkout), '--host', '0.0.0.0']
+        with patch.object(dev.sys, 'argv', argv), \
+                patch.dict(os.environ, {'LOCAL_SIGNAL_HOST': '127.0.0.1'}), \
+                patch.object(dev, 'checkout_snapshot', return_value=(checkout, {})), \
+                patch.object(dev, 'checkout_loads', return_value=True), \
+                patch.object(dev, 'start_server') as start, \
+                patch.object(dev, 'stop_server'), \
+                patch.object(dev.signal, 'signal'), \
+                patch.object(dev.time, 'sleep', side_effect=KeyboardInterrupt):
+            dev.main()
+        self.assertEqual(start.call_args.args[1].host, '127.0.0.1')
 
     @unittest.skipUnless(shutil.which('zsh'), 'macOS launcher requires zsh')
     def test_start_script_forwards_server_flags_without_reusing_an_installed_collector(self):

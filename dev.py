@@ -81,6 +81,11 @@ def main():
     parser.add_argument('--background', action='store_true', help='Use background collection and logging.')
     parser.add_argument('--checkout', type=Path, help='Follow this checkout, with this script’s directory as the fallback.')
     args = parser.parse_args()
+    if args.background and args.checkout:
+        # Older signed launchers pass a fixed host. Honor the Launch Agent's saved choice.
+        args.host = os.environ.get('LOCAL_SIGNAL_HOST', args.host)
+        if args.host not in ('127.0.0.1', '0.0.0.0'):
+            parser.error('LOCAL_SIGNAL_HOST must be 127.0.0.1 or 0.0.0.0.')
     stopping = False
 
     def stop_on_term(_signum, _frame):

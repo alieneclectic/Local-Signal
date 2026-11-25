@@ -65,6 +65,36 @@ def _database_files(path):
     return [file for file in files if file.exists()]
 
 
+def prepare_database(database):
+    """Restrict an existing database and make new SQLite files private from creation."""
+    path = _path(database)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if os.name != 'posix':
+        return path
+
+    existing = _database_files(path)
+    for file in [path, *(file for file in existing if file != path)]:
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+        if file == path:
+            flags |= os.O_CREAT
+        try:
+            descriptor = os.open(file, flags, 0o600)
+        except FileNotFoundError:
+            if file == path:
+                raise
+            continue  # SQLite may have removed an idle sidecar.
+        try:
+            mode = os.fstat(descriptor).st_mode
+            if not stat.S_ISREG(mode):
+                raise RecoveryError('Database files must be regular files.')
+            private_mode = mode & 0o600
+            if stat.S_IMODE(mode) != private_mode:
+                os.fchmod(descriptor, private_mode)
+        finally:
+            os.close(descriptor)
+    return path
+
+
 def _check_legacy_users(path):
     """Refuse open SQLite handles from collectors predating the advisory lease."""
     files = _database_files(path)
@@ -136,7 +166,7 @@ class DatabaseLease:
     def __enter__(self):
         if self.active:
             raise RecoveryError('This database lease is already held.')
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         lock = Path(str(self.path) + '.lock')
         if lock.is_symlink():
             raise RecoveryError('The database lock must not be a symbolic link.')
